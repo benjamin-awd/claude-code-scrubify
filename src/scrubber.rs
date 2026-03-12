@@ -246,6 +246,17 @@ fn scrub_all_strings_inner(
                 *s = "[REDACTED:sensitive-field]".to_string();
                 return vec![redaction];
             }
+            // Hash-based blacklist: redact the whole string if its hash matches
+            if bl.is_hash_match(s) && !al.is_allowed(s) {
+                let redaction = Redaction {
+                    pattern_name: "blacklist".to_string(),
+                    start: 0,
+                    end: s.len(),
+                    matched_text: s.clone(),
+                };
+                *s = "[REDACTED:blacklist]".to_string();
+                return vec![redaction];
+            }
             let (scrubbed, redactions) = scrub_text(s, ps, ec, al, bl);
             if !redactions.is_empty() {
                 *s = scrubbed;
@@ -496,5 +507,65 @@ mod tests {
             scrub_text(&first_pass, &ps, &no_entropy(), &no_allowlist(), &bl);
         assert_eq!(first_pass, second_pass);
         assert!(redactions.is_empty(), "second pass should find nothing");
+    }
+
+    // --- Blacklist hash tests ---
+
+    #[test]
+    fn blacklist_hash_redacts_whole_string_value() {
+        let ps = test_pattern_set();
+        let secret = "my-secret-company-value";
+        let hash = crate::allowlist::sha256_hex(secret);
+        let bl = Blacklist::from_hashes(vec![hash]);
+        let mut value = serde_json::json!({"key": secret});
+        let redactions = scrub_all_strings(&mut value, &ps, &no_entropy(), &no_allowlist(), &bl);
+        assert_eq!(redactions.len(), 1);
+        assert_eq!(redactions[0].pattern_name, "blacklist");
+        assert_eq!(value["key"], "[REDACTED:blacklist]");
+    }
+
+    #[test]
+    fn blacklist_hash_does_not_match_substring() {
+        let ps = test_pattern_set();
+        let secret = "my-secret-company-value";
+        let hash = crate::allowlist::sha256_hex(secret);
+        let bl = Blacklist::from_hashes(vec![hash]);
+        // The secret appears as a substring but the whole string value is different
+        let input = format!("prefix {secret} suffix");
+        let (result, redactions) = scrub_text(&input, &ps, &no_entropy(), &no_allowlist(), &bl);
+        assert!(redactions.is_empty(), "hash should not match substrings");
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn blacklist_hash_allowlist_overrides() {
+        let ps = test_pattern_set();
+        let secret = "my-secret-company-value";
+        let bl_hash = crate::allowlist::sha256_hex(secret);
+        let al_hash = crate::allowlist::sha256_hex(secret);
+        let bl = Blacklist::from_hashes(vec![bl_hash]);
+        let al = Allowlist::from_hashes(vec![al_hash]);
+        let mut value = serde_json::json!({"key": secret});
+        let redactions = scrub_all_strings(&mut value, &ps, &no_entropy(), &al, &bl);
+        assert!(
+            redactions.is_empty(),
+            "allowlist should override blacklist hash"
+        );
+        assert_eq!(value["key"], secret);
+    }
+
+    #[test]
+    fn blacklist_hash_idempotent() {
+        let ps = test_pattern_set();
+        let secret = "my-secret-company-value";
+        let hash = crate::allowlist::sha256_hex(secret);
+        let bl = Blacklist::from_hashes(vec![hash]);
+        let mut value = serde_json::json!({"key": secret});
+        scrub_all_strings(&mut value, &ps, &no_entropy(), &no_allowlist(), &bl);
+        assert_eq!(value["key"], "[REDACTED:blacklist]");
+        // Second pass should not re-redact
+        let redactions = scrub_all_strings(&mut value, &ps, &no_entropy(), &no_allowlist(), &bl);
+        assert!(redactions.is_empty());
+        assert_eq!(value["key"], "[REDACTED:blacklist]");
     }
 }

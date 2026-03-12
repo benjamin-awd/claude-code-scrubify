@@ -35,9 +35,12 @@ struct EntropyTomlConfig {
 
 #[derive(Deserialize, Default)]
 struct BlacklistConfig {
-    /// Exact strings that should always be redacted.
+    /// Exact strings that should always be redacted (substring match).
     #[serde(default)]
     strings: Vec<String>,
+    /// SHA-256 hashes of values that should always be redacted (exact match).
+    #[serde(default)]
+    hashes: Vec<String>,
 }
 
 /// Everything loaded from `~/.claude/scrubber.toml`.
@@ -93,30 +96,44 @@ impl Allowlist {
 
 /// A set of exact strings that should always be redacted.
 pub struct Blacklist {
-    /// Entries sorted longest-first for greedy matching.
+    /// Plaintext entries sorted longest-first for greedy substring matching.
     entries: Vec<String>,
+    /// SHA-256 hashes for exact whole-value matching.
+    hashes: HashSet<String>,
 }
 
 impl Blacklist {
     pub fn empty() -> Self {
         Blacklist {
             entries: Vec::new(),
+            hashes: HashSet::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.hashes.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.len() + self.hashes.len()
     }
 
-    /// Returns true if `text` contains any blacklisted string.
+    /// Returns true if `text` contains any blacklisted substring, or if
+    /// `text` exactly matches a blacklisted hash.
     pub fn contains_any(&self, text: &str) -> bool {
         self.entries
             .iter()
             .any(|entry| text.contains(entry.as_str()))
+            || self.is_hash_match(text)
+    }
+
+    /// Returns true if `value`'s SHA-256 hash is in the blacklist hash set.
+    pub fn is_hash_match(&self, value: &str) -> bool {
+        if self.hashes.is_empty() {
+            return false;
+        }
+        let hash = sha256_hex(value);
+        self.hashes.contains(&hash)
     }
 
     /// Find all non-overlapping (start, end) spans of blacklisted strings in `text`.
@@ -163,7 +180,18 @@ impl Blacklist {
         let mut entries: Vec<String> = strings.into_iter().map(String::from).collect();
         entries.sort_by_key(|b| std::cmp::Reverse(b.len()));
         entries.dedup();
-        Blacklist { entries }
+        Blacklist {
+            entries,
+            hashes: HashSet::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn from_hashes(hashes: Vec<String>) -> Self {
+        Blacklist {
+            entries: Vec::new(),
+            hashes: hashes.into_iter().map(|h| h.to_lowercase()).collect(),
+        }
     }
 }
 
@@ -222,13 +250,24 @@ pub fn load_config() -> Result<ScrubberSettings> {
     }
     bl_entries.sort_by_key(|b| std::cmp::Reverse(b.len()));
     if !bl_entries.is_empty() {
-        debug!(count = bl_entries.len(), "loaded blacklist entries");
+        debug!(count = bl_entries.len(), "loaded blacklist string entries");
+    }
+
+    let bl_hashes: HashSet<String> = config
+        .blacklist
+        .hashes
+        .into_iter()
+        .map(|h| h.to_lowercase())
+        .collect();
+    if !bl_hashes.is_empty() {
+        debug!(count = bl_hashes.len(), "loaded blacklist hashes");
     }
 
     Ok(ScrubberSettings {
         allowlist: Allowlist { hashes },
         blacklist: Blacklist {
             entries: bl_entries,
+            hashes: bl_hashes,
         },
         entropy_exclude_patterns: config.entropy.exclude_patterns,
     })
@@ -341,5 +380,57 @@ mod tests {
         let spans = bl.find_all_spans(text);
         assert_eq!(spans.len(), 1);
         assert_eq!(&text[spans[0].0..spans[0].1], "foobar123456");
+    }
+
+    // --- Blacklist hash tests ---
+
+    #[test]
+    fn blacklist_hash_match() {
+        let value = "my-secret-value";
+        let hash = sha256_hex(value);
+        let bl = Blacklist::from_hashes(vec![hash]);
+        assert!(bl.is_hash_match(value));
+        assert!(!bl.is_hash_match("other-value"));
+    }
+
+    #[test]
+    fn blacklist_hash_no_substring_match() {
+        // Hash-based matching should NOT do substring matching
+        let value = "my-secret-value";
+        let hash = sha256_hex(value);
+        let bl = Blacklist::from_hashes(vec![hash]);
+        assert!(!bl.contains_any("prefix my-secret-value suffix"));
+        // But exact match via contains_any works
+        assert!(bl.contains_any(value));
+    }
+
+    #[test]
+    fn empty_blacklist_hash_matches_nothing() {
+        let bl = Blacklist::empty();
+        assert!(!bl.is_hash_match("anything"));
+    }
+
+    #[test]
+    fn blacklist_hash_case_insensitive() {
+        let hash = sha256_hex("test").to_uppercase();
+        let bl = Blacklist::from_hashes(vec![hash]);
+        assert!(bl.is_hash_match("test"));
+    }
+
+    #[test]
+    fn blacklist_combined_strings_and_hashes() {
+        let hash = sha256_hex("exact-match-value");
+        let bl = Blacklist {
+            entries: vec!["substring1".to_string()],
+            hashes: HashSet::from([hash.to_lowercase()]),
+        };
+        assert_eq!(bl.len(), 2);
+        assert!(!bl.is_empty());
+        // Substring match
+        assert!(bl.contains_any("has substring1 in it"));
+        // Hash exact match
+        assert!(bl.is_hash_match("exact-match-value"));
+        // Hash doesn't do substring
+        assert!(!bl.is_hash_match("has exact-match-value in it"));
     }
 }
