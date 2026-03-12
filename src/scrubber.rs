@@ -28,10 +28,14 @@ pub(crate) fn scrub_text(
     let mut spans: Vec<Redaction> = Vec::new();
 
     // Collect regex matches
-    // Use quick_check to find which patterns matched, then get exact spans
+    // Use quick_check to find which patterns matched, then keyword pre-filter,
+    // then get exact spans.
     let matching_indices: Vec<_> = pattern_set.quick_check.matches(text).into_iter().collect();
     for idx in matching_indices {
         let pat = &pattern_set.patterns[idx];
+        if !pat.keyword_hit(text) {
+            continue;
+        }
         for m in pat.regex.find_iter(text) {
             let matched = m.as_str();
             if KNOWN_EXAMPLES.iter().any(|ex| matched.contains(ex)) {

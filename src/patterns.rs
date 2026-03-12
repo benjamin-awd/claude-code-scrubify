@@ -6,6 +6,9 @@ use std::path::PathBuf;
 pub(crate) struct SecretPattern {
     pub name: String,
     pub regex: Regex,
+    /// Cheap substring keywords — if non-empty, at least one must appear in the
+    /// text before we bother running the regex.
+    pub keywords: Vec<String>,
 }
 
 pub(crate) struct PatternSet {
@@ -17,6 +20,20 @@ pub(crate) struct PatternSet {
 struct CustomPattern {
     name: String,
     regex: String,
+    #[serde(default)]
+    keywords: Vec<String>,
+}
+
+impl SecretPattern {
+    /// Returns true if the text contains at least one keyword (case-insensitive).
+    /// If no keywords are defined, always returns true.
+    pub(crate) fn keyword_hit(&self, text: &str) -> bool {
+        if self.keywords.is_empty() {
+            return true;
+        }
+        let lower = text.to_lowercase();
+        self.keywords.iter().any(|kw| lower.contains(kw))
+    }
 }
 
 impl PatternSet {
@@ -38,87 +55,128 @@ impl PatternSet {
 }
 
 fn built_in_patterns() -> Result<Vec<SecretPattern>> {
-    let defs = vec![
+    // (name, regex, keywords) — keywords are cheap substring checks run before
+    // the regex.  If the list is non-empty, at least one keyword must appear
+    // (case-insensitive) for the regex to fire.  Empty list = always run regex.
+    let defs: Vec<(&str, &str, &[&str])> = vec![
         // AWS
-        ("aws-access-key", r"(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}"),
+        (
+            "aws-access-key",
+            r"(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}",
+            &["akia", "abia", "acca", "asia"],
+        ),
         (
             "aws-secret-key",
             r#"(?i)(?:aws_secret_access_key|aws_secret_key|secret_access_key)\s*[=:]\s*['"]?[A-Za-z0-9/+=]{40}['"]?"#,
+            &["aws_secret", "secret_access_key"],
         ),
         // GitHub
         (
             "github-token",
             r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,255}",
+            &["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
         ),
-        ("github-fine-grained", r"github_pat_[A-Za-z0-9_]{22,255}"),
+        (
+            "github-fine-grained",
+            r"github_pat_[A-Za-z0-9_]{22,255}",
+            &["github_pat_"],
+        ),
         // GitLab
-        ("gitlab-token", r"glpat-[A-Za-z0-9\-_]{20,}"),
+        ("gitlab-token", r"glpat-[A-Za-z0-9\-_]{20,}", &["glpat-"]),
         // JWT
         (
             "jwt",
             r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+            &["eyj"],
         ),
         // Private keys
         (
             "private-key",
             r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+            &["private key"],
         ),
         // Generic connection strings
         (
             "connection-string",
             r#"(?i)(?:mysql|postgres(?:ql)?|mongodb(?:\+srv)?|redis|amqp|mssql)://[^\s'"]{10,}"#,
+            &[
+                "mysql://", "postgres", "mongodb", "redis://", "amqp://", "mssql://",
+            ],
         ),
         // Password assignments (exclude variable refs like ${...} by disallowing $ in value)
         (
             "password-assignment",
             r#"(?i)(?:password|passwd|pwd)\s*[=:]\s*['"][^\s'"$]{8,}['"]"#,
+            &["password", "passwd", "pwd"],
         ),
         // Stripe
-        ("stripe-key", r"(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{20,}"),
+        (
+            "stripe-key",
+            r"(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{20,}",
+            &[
+                "sk_live", "sk_test", "pk_live", "pk_test", "rk_live", "rk_test",
+            ],
+        ),
         // Slack
-        ("slack-token", r"xox[bprs]-[A-Za-z0-9\-]{10,}"),
+        (
+            "slack-token",
+            r"xox[bprs]-[A-Za-z0-9\-]{10,}",
+            &["xoxb-", "xoxp-", "xoxr-", "xoxs-"],
+        ),
         (
             "slack-webhook",
             r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+",
+            &["hooks.slack.com"],
         ),
         // Anthropic
-        ("anthropic-key", r"sk-ant-[A-Za-z0-9\-_]{20,}"),
+        ("anthropic-key", r"sk-ant-[A-Za-z0-9\-_]{20,}", &["sk-ant-"]),
         // OpenAI (no hyphens after sk- prefix; real keys are alphanumeric only)
-        ("openai-key", r"sk-[A-Za-z0-9]{20,}"),
+        ("openai-key", r"sk-[A-Za-z0-9]{20,}", &["sk-"]),
         // Google
-        ("google-api-key", r"AIza[A-Za-z0-9\-_]{35}"),
+        ("google-api-key", r"AIza[A-Za-z0-9\-_]{35}", &["aiza"]),
         (
             "google-oauth-secret",
             r#"(?i)client_secret['"]?\s*[=:]\s*['"]?GOCSPX-[A-Za-z0-9\-_]+"#,
+            &["gocspx-"],
         ),
         // npm
-        ("npm-token", r"npm_[A-Za-z0-9]{36}"),
+        ("npm-token", r"npm_[A-Za-z0-9]{36}", &["npm_"]),
         // Generic API key assignment
         (
             "generic-api-key",
             r#"(?i)(?:api_key|apikey|api_secret|secret_key|access_token)\s*[=:]\s*['"][A-Za-z0-9\-_./+=]{20,}['"]"#,
+            &[
+                "api_key",
+                "apikey",
+                "api_secret",
+                "secret_key",
+                "access_token",
+            ],
         ),
         // Heroku
         (
             "heroku-api-key",
             r#"(?i)heroku[_\s]*api[_\s]*key\s*[=:]\s*['"]?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#,
+            &["heroku"],
         ),
         // Twilio
-        ("twilio-api-key", r"SK[0-9a-fA-F]{32}"),
+        ("twilio-api-key", r"SK[0-9a-fA-F]{32}", &["sk"]),
         // SendGrid
         (
             "sendgrid-key",
             r"SG\.[A-Za-z0-9\-_]{22,}\.[A-Za-z0-9\-_]{22,}",
+            &["sg."],
         ),
     ];
 
     defs.into_iter()
-        .map(|(name, pattern)| {
+        .map(|(name, pattern, keywords)| {
             let regex = Regex::new(pattern)
                 .with_context(|| format!("invalid regex for pattern '{name}'"))?;
             Ok(SecretPattern {
                 name: name.to_string(),
                 regex,
+                keywords: keywords.iter().map(|k| (*k).to_string()).collect(),
             })
         })
         .collect()
@@ -145,6 +203,7 @@ fn load_custom_patterns() -> Result<Option<Vec<SecretPattern>>> {
             Ok(SecretPattern {
                 name: c.name,
                 regex,
+                keywords: c.keywords,
             })
         })
         .collect::<Result<_>>()?;
@@ -374,5 +433,16 @@ mod tests {
         let ps = PatternSet::load(true).unwrap();
         assert!(ps.patterns.len() >= 20);
         assert_eq!(ps.patterns.len(), ps.quick_check.len());
+    }
+
+    #[test]
+    fn keyword_prefilter() {
+        let patterns = built_in_patterns().unwrap();
+        let aws = patterns
+            .iter()
+            .find(|p| p.name == "aws-access-key")
+            .unwrap();
+        assert!(aws.keyword_hit("contains AKIA somewhere"));
+        assert!(!aws.keyword_hit("no relevant keywords here"));
     }
 }
