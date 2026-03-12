@@ -2,8 +2,8 @@ use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
@@ -28,11 +28,7 @@ pub fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
     let jsonl_files: Vec<PathBuf> = WalkDir::new(&projects_dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "jsonl")
-        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
         .map(|e| e.into_path())
         .collect();
 

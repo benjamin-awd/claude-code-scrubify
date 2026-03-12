@@ -8,7 +8,7 @@ use tracing::warn;
 
 use crate::entropy::EntropyConfig;
 use crate::patterns::PatternSet;
-use crate::scrubber::{scrub_text, Redaction};
+use crate::scrubber::{Redaction, scrub_text};
 
 pub struct LineDiff {
     pub line_number: usize, // 1-based
@@ -17,6 +17,7 @@ pub struct LineDiff {
 
 pub struct ScrubResult {
     pub redactions: Vec<Redaction>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub lines_modified: usize,
     pub diffs: Vec<LineDiff>,
 }
@@ -37,10 +38,8 @@ pub fn scrub_jsonl_file(
     let mut all_redactions: Vec<Redaction> = Vec::new();
     let mut lines_modified = 0;
     let mut diffs: Vec<LineDiff> = Vec::new();
-    let mut line_number: usize = 0;
-
-    for line_result in reader.lines() {
-        line_number += 1;
+    for (line_number, line_result) in reader.lines().enumerate() {
+        let line_number = line_number + 1;
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
@@ -84,7 +83,8 @@ pub fn scrub_jsonl_file(
     drop(writer);
 
     if !dry_run && !all_redactions.is_empty() {
-        temp.persist(path).with_context(|| format!("persisting {}", path.display()))?;
+        temp.persist(path)
+            .with_context(|| format!("persisting {}", path.display()))?;
     }
 
     Ok(ScrubResult {
@@ -94,14 +94,23 @@ pub fn scrub_jsonl_file(
     })
 }
 
-fn scrub_value(value: &mut Value, pattern_set: &PatternSet, entropy_cfg: &EntropyConfig) -> Vec<Redaction> {
+fn scrub_value(
+    value: &mut Value,
+    pattern_set: &PatternSet,
+    entropy_cfg: &EntropyConfig,
+) -> Vec<Redaction> {
     let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     match msg_type {
         "system" | "file-history-snapshot" => Vec::new(),
         "user" => scrub_at_path(value, &["message", "content"], pattern_set, entropy_cfg),
         "assistant" => scrub_assistant_message(value, pattern_set, entropy_cfg),
-        "progress" => scrub_at_path(value, &["data", "message", "message", "content"], pattern_set, entropy_cfg),
+        "progress" => scrub_at_path(
+            value,
+            &["data", "message", "message", "content"],
+            pattern_set,
+            entropy_cfg,
+        ),
         "queue-operation" => scrub_at_path(value, &["content"], pattern_set, entropy_cfg),
         _ => {
             // Unknown type — recursively scrub all strings as a safety net
@@ -110,7 +119,11 @@ fn scrub_value(value: &mut Value, pattern_set: &PatternSet, entropy_cfg: &Entrop
     }
 }
 
-fn scrub_assistant_message(value: &mut Value, ps: &PatternSet, ec: &EntropyConfig) -> Vec<Redaction> {
+fn scrub_assistant_message(
+    value: &mut Value,
+    ps: &PatternSet,
+    ec: &EntropyConfig,
+) -> Vec<Redaction> {
     let mut redactions = Vec::new();
 
     // Navigate to .message.content which is an array
@@ -153,7 +166,12 @@ fn scrub_assistant_message(value: &mut Value, ps: &PatternSet, ec: &EntropyConfi
     redactions
 }
 
-fn scrub_at_path(value: &mut Value, path: &[&str], ps: &PatternSet, ec: &EntropyConfig) -> Vec<Redaction> {
+fn scrub_at_path(
+    value: &mut Value,
+    path: &[&str],
+    ps: &PatternSet,
+    ec: &EntropyConfig,
+) -> Vec<Redaction> {
     let mut current = value as &mut Value;
     for &key in &path[..path.len().saturating_sub(1)] {
         match current.get_mut(key) {
@@ -162,10 +180,10 @@ fn scrub_at_path(value: &mut Value, path: &[&str], ps: &PatternSet, ec: &Entropy
         }
     }
 
-    if let Some(&last_key) = path.last() {
-        if let Some(target) = current.get_mut(last_key) {
-            return scrub_all_strings(target, ps, ec);
-        }
+    if let Some(&last_key) = path.last()
+        && let Some(target) = current.get_mut(last_key)
+    {
+        return scrub_all_strings(target, ps, ec);
     }
 
     Vec::new()
@@ -180,12 +198,14 @@ fn scrub_all_strings(value: &mut Value, ps: &PatternSet, ec: &EntropyConfig) -> 
             }
             redactions
         }
-        Value::Array(arr) => {
-            arr.iter_mut().flat_map(|v| scrub_all_strings(v, ps, ec)).collect()
-        }
-        Value::Object(map) => {
-            map.values_mut().flat_map(|v| scrub_all_strings(v, ps, ec)).collect()
-        }
+        Value::Array(arr) => arr
+            .iter_mut()
+            .flat_map(|v| scrub_all_strings(v, ps, ec))
+            .collect(),
+        Value::Object(map) => map
+            .values_mut()
+            .flat_map(|v| scrub_all_strings(v, ps, ec))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -205,7 +225,10 @@ mod tests {
         let line = r#"{"type":"user","message":{"content":"my token is ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
         let file = make_test_file(&format!("{line}\n"));
         let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig { enabled: false, ..Default::default() };
+        let ec = EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
         assert_eq!(result.lines_modified, 1);
@@ -222,7 +245,10 @@ mod tests {
         let original = format!("{line}\n");
         let file = make_test_file(&original);
         let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig { enabled: false, ..Default::default() };
+        let ec = EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, true).unwrap();
         assert!(!result.redactions.is_empty());
@@ -240,14 +266,21 @@ mod tests {
     #[test]
     fn dry_run_diffs_have_correct_line_numbers() {
         let lines = concat!(
-            r#"{"type":"system","content":"safe"}"#, "\n",
-            r#"{"type":"user","message":{"content":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#, "\n",
-            r#"{"type":"system","content":"also safe"}"#, "\n",
-            r#"{"type":"user","message":{"content":"key AKIAVCODYLSA53PQK4ZA"}}"#, "\n",
+            r#"{"type":"system","content":"safe"}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#,
+            "\n",
+            r#"{"type":"system","content":"also safe"}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"key AKIAVCODYLSA53PQK4ZA"}}"#,
+            "\n",
         );
         let file = make_test_file(lines);
         let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig { enabled: false, ..Default::default() };
+        let ec = EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, true).unwrap();
         assert_eq!(result.diffs.len(), 2);
@@ -260,11 +293,17 @@ mod tests {
         let line = r#"{"type":"user","message":{"content":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
         let file = make_test_file(&format!("{line}\n"));
         let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig { enabled: false, ..Default::default() };
+        let ec = EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
         assert!(!result.redactions.is_empty());
-        assert!(result.diffs.is_empty(), "non-dry-run should not collect diffs");
+        assert!(
+            result.diffs.is_empty(),
+            "non-dry-run should not collect diffs"
+        );
     }
 
     #[test]
@@ -272,7 +311,10 @@ mod tests {
         let content = "not json at all\n{\"type\":\"system\"}\n";
         let file = make_test_file(content);
         let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig { enabled: false, ..Default::default() };
+        let ec = EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, false);
         assert!(result.is_ok());
@@ -283,7 +325,10 @@ mod tests {
         let line = r#"{"type":"system","content":"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}"#;
         let file = make_test_file(&format!("{line}\n"));
         let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig { enabled: false, ..Default::default() };
+        let ec = EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
         assert!(result.redactions.is_empty());
@@ -294,7 +339,10 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"command":"echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}]}}"#;
         let file = make_test_file(&format!("{line}\n"));
         let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig { enabled: false, ..Default::default() };
+        let ec = EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
         assert!(!result.redactions.is_empty());

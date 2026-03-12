@@ -11,7 +11,10 @@ use tracing_subscriber::EnvFilter;
 use crate::entropy::EntropyConfig;
 
 #[derive(Parser)]
-#[command(name = "scrub-history", about = "Redact secrets from Claude Code chat history")]
+#[command(
+    name = "scrub-history",
+    about = "Redact secrets from Claude Code chat history"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -63,8 +66,8 @@ fn main() -> anyhow::Result<()> {
     };
 
     // RUST_LOG overrides --verbose/--quiet when set
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -81,7 +84,10 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Hook => hook::run_hook(&entropy_cfg),
-        Command::Scan { dry_run, no_truncate } => scan::run_scan(dry_run, no_truncate, &entropy_cfg),
+        Command::Scan {
+            dry_run,
+            no_truncate,
+        } => scan::run_scan(dry_run, no_truncate, &entropy_cfg),
     }
 
     Ok(())

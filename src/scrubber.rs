@@ -1,10 +1,10 @@
-use crate::entropy::{find_high_entropy_tokens, EntropyConfig};
+use crate::entropy::{EntropyConfig, find_high_entropy_tokens};
 use crate::patterns::PatternSet;
 
 /// Well-known example/placeholder values that should not be redacted.
 const KNOWN_EXAMPLES: &[&str] = &[
-    "AKIAIOSFODNN7EXAMPLE",  // AWS docs example key
-    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",  // AWS docs example secret
+    "AKIAIOSFODNN7EXAMPLE",                     // AWS docs example key
+    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", // AWS docs example secret
 ];
 
 #[derive(Debug, Clone)]
@@ -15,7 +15,11 @@ pub struct Redaction {
     pub matched_text: String,
 }
 
-pub fn scrub_text(text: &str, pattern_set: &PatternSet, entropy_cfg: &EntropyConfig) -> (String, Vec<Redaction>) {
+pub fn scrub_text(
+    text: &str,
+    pattern_set: &PatternSet,
+    entropy_cfg: &EntropyConfig,
+) -> (String, Vec<Redaction>) {
     // Fast bail-out: if no regex matches at all and entropy is disabled, return early
     if !pattern_set.quick_check.is_match(text) && !entropy_cfg.enabled {
         return (text.to_string(), Vec::new());
@@ -70,14 +74,14 @@ pub fn scrub_text(text: &str, pattern_set: &PatternSet, entropy_cfg: &EntropyCon
 
     let mut merged: Vec<(usize, usize, String)> = Vec::new();
     for span in &spans {
-        if let Some(last) = merged.last_mut() {
-            if span.start <= last.1 {
-                // Overlapping - extend
-                if span.end > last.1 {
-                    last.1 = span.end;
-                }
-                continue;
+        if let Some(last) = merged.last_mut()
+            && span.start <= last.1
+        {
+            // Overlapping - extend
+            if span.end > last.1 {
+                last.1 = span.end;
             }
+            continue;
         }
         merged.push((span.start, span.end, span.pattern_name.clone()));
     }
@@ -113,7 +117,10 @@ mod tests {
     }
 
     fn no_entropy() -> EntropyConfig {
-        EntropyConfig { enabled: false, ..Default::default() }
+        EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        }
     }
 
     #[test]

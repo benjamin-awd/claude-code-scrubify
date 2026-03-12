@@ -24,7 +24,8 @@ pub struct EntropyMatch {
 }
 
 static EXCLUSION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?x)
+    Regex::new(
+        r"(?x)
         ^(?:
             (?:[a-zA-Z]:[/\\]|[/~])[^\s]*          # file paths
             | https?://[^\s]+                        # URLs
@@ -32,12 +33,12 @@ static EXCLUSION_RE: LazyLock<Regex> = LazyLock::new(|| {
             | \[REDACTED:[^\]]+\]                     # already redacted
             | [0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}  # UUIDs
         )$
-    ").unwrap()
+    ",
+    )
+    .unwrap()
 });
 
-static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[A-Za-z0-9+/=_\-]{20,}").unwrap()
-});
+static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/=_\-]{20,}").unwrap());
 
 pub fn shannon_entropy(s: &str) -> f64 {
     let len = s.len() as f64;
@@ -50,7 +51,8 @@ pub fn shannon_entropy(s: &str) -> f64 {
         counts[b as usize] += 1;
     }
 
-    counts.iter()
+    counts
+        .iter()
         .filter(|&&c| c > 0)
         .map(|&c| {
             let freq = c as f64 / len;
@@ -64,7 +66,8 @@ pub fn find_high_entropy_tokens(text: &str, config: &EntropyConfig) -> Vec<Entro
         return Vec::new();
     }
 
-    TOKEN_RE.find_iter(text)
+    TOKEN_RE
+        .find_iter(text)
         .filter_map(|m| {
             let token = m.as_str();
             if token.len() < config.min_len {
@@ -128,7 +131,10 @@ mod tests {
 
     #[test]
     fn disabled_returns_empty() {
-        let config = EntropyConfig { enabled: false, ..Default::default() };
+        let config = EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let text = "aB3kL9mN2pQ5rT8vX1yZ4cF7gH0jK6wE";
         let matches = find_high_entropy_tokens(text, &config);
         assert!(matches.is_empty());
