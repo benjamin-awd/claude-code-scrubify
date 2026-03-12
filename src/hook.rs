@@ -14,7 +14,7 @@ struct HookInput {
     stop_hook_active: bool,
 }
 
-pub fn run_hook(entropy_cfg: &EntropyConfig) {
+pub(crate) fn run_hook(entropy_cfg: &EntropyConfig) {
     // Always exit 0 — hook failures block Claude Code
     if let Err(e) = run_hook_inner(entropy_cfg) {
         error!(error = %e, "scrub-history hook error");

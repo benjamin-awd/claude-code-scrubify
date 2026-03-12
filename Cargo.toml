@@ -14,3 +14,22 @@ rayon = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints.rust]
+unsafe_code = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -2 }
+# Noisy pedantic lints to allow
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+too_many_lines = "allow"
+# Restriction lints worth enabling
+print_stdout = "warn"
+print_stderr = "warn"
+dbg_macro = "warn"
+exit = "warn"
+get_unwrap = "warn"

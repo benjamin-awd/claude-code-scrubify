@@ -11,14 +11,12 @@ use crate::entropy::EntropyConfig;
 use crate::jsonl::{self, LineDiff};
 use crate::patterns::PatternSet;
 
-pub fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
-    let projects_dir = match std::env::var_os("HOME").map(PathBuf::from) {
-        Some(home) => home.join(".claude").join("projects"),
-        None => {
-            error!("HOME not set");
-            std::process::exit(1);
-        }
+pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        error!("HOME not set");
+        return;
     };
+    let projects_dir = home.join(".claude").join("projects");
 
     if !projects_dir.exists() {
         warn!(path = %projects_dir.display(), "no projects directory found");
@@ -27,9 +25,9 @@ pub fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
 
     let jsonl_files: Vec<PathBuf> = WalkDir::new(&projects_dir)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-        .map(|e| e.into_path())
+        .map(walkdir::DirEntry::into_path)
         .collect();
 
     let total_files = jsonl_files.len();
@@ -44,7 +42,7 @@ pub fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
         Ok(ps) => ps,
         Err(e) => {
             error!(error = %e, "failed to load patterns");
-            std::process::exit(1);
+            return;
         }
     };
 
@@ -102,6 +100,7 @@ pub fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
     }
 }
 
+#[allow(clippy::print_stderr)] // intentional user-facing dry-run output
 fn print_unified_diff(path: &Path, diffs: &[LineDiff], no_truncate: bool) {
     let path_str = path.display();
     eprintln!("\x1b[1m  {path_str}\x1b[0m");

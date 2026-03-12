@@ -8,14 +8,14 @@ const KNOWN_EXAMPLES: &[&str] = &[
 ];
 
 #[derive(Debug, Clone)]
-pub struct Redaction {
+pub(crate) struct Redaction {
     pub pattern_name: String,
     pub start: usize,
     pub end: usize,
     pub matched_text: String,
 }
 
-pub fn scrub_text(
+pub(crate) fn scrub_text(
     text: &str,
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,

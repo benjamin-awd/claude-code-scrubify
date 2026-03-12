@@ -52,7 +52,7 @@ enum Command {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     let cli = Cli::parse();
 
     let default_level = if cli.quiet {
@@ -89,6 +89,4 @@ fn main() -> anyhow::Result<()> {
             no_truncate,
         } => scan::run_scan(dry_run, no_truncate, &entropy_cfg),
     }
-
-    Ok(())
 }

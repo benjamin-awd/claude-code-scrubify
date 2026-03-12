@@ -10,19 +10,19 @@ use crate::entropy::EntropyConfig;
 use crate::patterns::PatternSet;
 use crate::scrubber::{Redaction, scrub_text};
 
-pub struct LineDiff {
+pub(crate) struct LineDiff {
     pub line_number: usize, // 1-based
     pub redactions: Vec<Redaction>,
 }
 
-pub struct ScrubResult {
+pub(crate) struct ScrubResult {
     pub redactions: Vec<Redaction>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub lines_modified: usize,
     pub diffs: Vec<LineDiff>,
 }
 
-pub fn scrub_jsonl_file(
+pub(crate) fn scrub_jsonl_file(
     path: &Path,
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,
@@ -53,29 +53,26 @@ pub fn scrub_jsonl_file(
             continue;
         }
 
-        match serde_json::from_str::<Value>(&line) {
-            Ok(mut value) => {
-                let redactions = scrub_value(&mut value, pattern_set, entropy_cfg);
-                if !redactions.is_empty() {
-                    lines_modified += 1;
-                    if dry_run {
-                        diffs.push(LineDiff {
-                            line_number,
-                            redactions: redactions.clone(),
-                        });
-                    }
-                    all_redactions.extend(redactions);
-                    let scrubbed = serde_json::to_string(&value)?;
-                    writeln!(writer, "{scrubbed}")?;
-                } else {
-                    writeln!(writer, "{line}")?;
-                }
-            }
-            Err(_) => {
-                // Malformed JSON line — write unchanged
-                warn!(file = %path.display(), "malformed JSON line");
+        if let Ok(mut value) = serde_json::from_str::<Value>(&line) {
+            let redactions = scrub_value(&mut value, pattern_set, entropy_cfg);
+            if redactions.is_empty() {
                 writeln!(writer, "{line}")?;
+            } else {
+                lines_modified += 1;
+                if dry_run {
+                    diffs.push(LineDiff {
+                        line_number,
+                        redactions: redactions.clone(),
+                    });
+                }
+                all_redactions.extend(redactions);
+                let scrubbed = serde_json::to_string(&value)?;
+                writeln!(writer, "{scrubbed}")?;
             }
+        } else {
+            // Malformed JSON line — write unchanged
+            warn!(file = %path.display(), "malformed JSON line");
+            writeln!(writer, "{line}")?;
         }
     }
 

@@ -3,12 +3,12 @@ use regex::{Regex, RegexSet};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-pub struct SecretPattern {
+pub(crate) struct SecretPattern {
     pub name: String,
     pub regex: Regex,
 }
 
-pub struct PatternSet {
+pub(crate) struct PatternSet {
     pub patterns: Vec<SecretPattern>,
     pub quick_check: RegexSet,
 }
@@ -20,7 +20,7 @@ struct CustomPattern {
 }
 
 impl PatternSet {
-    pub fn load(skip_custom: bool) -> Result<Self> {
+    pub(crate) fn load(skip_custom: bool) -> Result<Self> {
         let mut patterns = built_in_patterns()?;
 
         if !skip_custom && let Some(custom) = load_custom_patterns()? {
@@ -43,7 +43,7 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
         ("aws-access-key", r"(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}"),
         (
             "aws-secret-key",
-            r##"(?i)(?:aws_secret_access_key|aws_secret_key|secret_access_key)\s*[=:]\s*['"]?[A-Za-z0-9/+=]{40}['"]?"##,
+            r#"(?i)(?:aws_secret_access_key|aws_secret_key|secret_access_key)\s*[=:]\s*['"]?[A-Za-z0-9/+=]{40}['"]?"#,
         ),
         // GitHub
         (
@@ -66,12 +66,12 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
         // Generic connection strings
         (
             "connection-string",
-            r##"(?i)(?:mysql|postgres(?:ql)?|mongodb(?:\+srv)?|redis|amqp|mssql)://[^\s'"]{10,}"##,
+            r#"(?i)(?:mysql|postgres(?:ql)?|mongodb(?:\+srv)?|redis|amqp|mssql)://[^\s'"]{10,}"#,
         ),
         // Password assignments (exclude variable refs like ${...} by disallowing $ in value)
         (
             "password-assignment",
-            r##"(?i)(?:password|passwd|pwd)\s*[=:]\s*['"][^\s'"$]{8,}['"]"##,
+            r#"(?i)(?:password|passwd|pwd)\s*[=:]\s*['"][^\s'"$]{8,}['"]"#,
         ),
         // Stripe
         ("stripe-key", r"(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{20,}"),
@@ -89,19 +89,19 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
         ("google-api-key", r"AIza[A-Za-z0-9\-_]{35}"),
         (
             "google-oauth-secret",
-            r##"(?i)client_secret['"]?\s*[=:]\s*['"]?GOCSPX-[A-Za-z0-9\-_]+"##,
+            r#"(?i)client_secret['"]?\s*[=:]\s*['"]?GOCSPX-[A-Za-z0-9\-_]+"#,
         ),
         // npm
         ("npm-token", r"npm_[A-Za-z0-9]{36}"),
         // Generic API key assignment
         (
             "generic-api-key",
-            r##"(?i)(?:api_key|apikey|api_secret|secret_key|access_token)\s*[=:]\s*['"][A-Za-z0-9\-_./+=]{20,}['"]"##,
+            r#"(?i)(?:api_key|apikey|api_secret|secret_key|access_token)\s*[=:]\s*['"][A-Za-z0-9\-_./+=]{20,}['"]"#,
         ),
         // Heroku
         (
             "heroku-api-key",
-            r##"(?i)heroku[_\s]*api[_\s]*key\s*[=:]\s*['"]?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"##,
+            r#"(?i)heroku[_\s]*api[_\s]*key\s*[=:]\s*['"]?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#,
         ),
         // Twilio
         ("twilio-api-key", r"SK[0-9a-fA-F]{32}"),
@@ -270,7 +270,7 @@ mod tests {
             "password-assignment",
             &[
                 r#"password = "my_super_secret_password""#,
-                r#"PASSWORD: 'longpassword123'"#,
+                r"PASSWORD: 'longpassword123'",
             ],
             &[
                 r#"password = "short""#,
