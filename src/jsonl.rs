@@ -186,9 +186,58 @@ fn scrub_at_path(
     Vec::new()
 }
 
+/// Minimum length for a value to be redacted by key-name alone.
+const SENSITIVE_KEY_MIN_VALUE_LEN: usize = 8;
+
+/// Field names whose string values should always be redacted (case-insensitive).
+const SENSITIVE_KEYS: &[&str] = &[
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "api_key",
+    "apikey",
+    "api_secret",
+    "access_token",
+    "auth_token",
+    "token",
+    "private_key",
+    "secret_key",
+    "credentials",
+    "authorization",
+];
+
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    SENSITIVE_KEYS
+        .iter()
+        .any(|&k| lower == k || lower.ends_with(&format!("_{k}")))
+}
+
 fn scrub_all_strings(value: &mut Value, ps: &PatternSet, ec: &EntropyConfig) -> Vec<Redaction> {
+    scrub_all_strings_inner(value, ps, ec, false)
+}
+
+fn scrub_all_strings_inner(
+    value: &mut Value,
+    ps: &PatternSet,
+    ec: &EntropyConfig,
+    force_redact: bool,
+) -> Vec<Redaction> {
     match value {
         Value::String(s) => {
+            // Key-value awareness: if the parent key was sensitive and the
+            // value is long enough, redact the whole thing unconditionally.
+            if force_redact && s.len() >= SENSITIVE_KEY_MIN_VALUE_LEN {
+                let redaction = Redaction {
+                    pattern_name: "sensitive-field".to_string(),
+                    start: 0,
+                    end: s.len(),
+                    matched_text: s.clone(),
+                };
+                *s = "[REDACTED:sensitive-field]".to_string();
+                return vec![redaction];
+            }
             let (scrubbed, redactions) = scrub_text(s, ps, ec);
             if !redactions.is_empty() {
                 *s = scrubbed;
@@ -197,12 +246,16 @@ fn scrub_all_strings(value: &mut Value, ps: &PatternSet, ec: &EntropyConfig) -> 
         }
         Value::Array(arr) => arr
             .iter_mut()
-            .flat_map(|v| scrub_all_strings(v, ps, ec))
+            .flat_map(|v| scrub_all_strings_inner(v, ps, ec, force_redact))
             .collect(),
-        Value::Object(map) => map
-            .values_mut()
-            .flat_map(|v| scrub_all_strings(v, ps, ec))
-            .collect(),
+        Value::Object(map) => {
+            let mut redactions = Vec::new();
+            for (key, val) in map.iter_mut() {
+                let sensitive = is_sensitive_key(key);
+                redactions.extend(scrub_all_strings_inner(val, ps, ec, sensitive));
+            }
+            redactions
+        }
         _ => Vec::new(),
     }
 }
@@ -346,5 +399,42 @@ mod tests {
 
         let content = fs::read_to_string(file.path()).unwrap();
         assert!(content.contains("[REDACTED:github-token]"));
+    }
+
+    #[test]
+    fn redacts_sensitive_field_by_key_name() {
+        // The value doesn't match any regex pattern, but the key "password" triggers redaction
+        let line =
+            r#"{"type":"user","message":{"content":{"password":"not_a_known_pattern_value"}}}"#;
+        let file = make_test_file(&format!("{line}\n"));
+        let ps = PatternSet::load(true).unwrap();
+        let ec = EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        assert!(!result.redactions.is_empty());
+
+        let content = fs::read_to_string(file.path()).unwrap();
+        assert!(content.contains("[REDACTED:sensitive-field]"));
+        assert!(!content.contains("not_a_known_pattern_value"));
+    }
+
+    #[test]
+    fn skips_short_sensitive_field_values() {
+        let line = r#"{"type":"user","message":{"content":{"password":"short"}}}"#;
+        let file = make_test_file(&format!("{line}\n"));
+        let ps = PatternSet::load(true).unwrap();
+        let ec = EntropyConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        assert!(
+            result.redactions.is_empty(),
+            "short values under sensitive keys should not be redacted"
+        );
     }
 }
