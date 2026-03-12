@@ -20,15 +20,19 @@ struct AllowlistConfig {
 
 const HOOK_COMMAND: &str = "scrub-history hook";
 
-fn build_hook_entry() -> serde_json::Value {
+fn build_hook_entry(async_hook: bool) -> serde_json::Value {
+    let mut hook = serde_json::json!({
+        "type": "command",
+        "command": HOOK_COMMAND
+    });
+    if async_hook {
+        hook.as_object_mut()
+            .unwrap()
+            .insert("async".into(), serde_json::Value::Bool(true));
+    }
     serde_json::json!({
         "matcher": "",
-        "hooks": [
-            {
-                "type": "command",
-                "command": HOOK_COMMAND
-            }
-        ]
+        "hooks": [hook]
     })
 }
 
@@ -54,11 +58,17 @@ fn run_init_inner() -> Result<()> {
     println!("{BOLD}Configuring scrub-history...{RESET}");
     println!();
 
-    // Step 1: Install hook
-    let settings_path = claude_dir.join("settings.json");
-    install_hook(&settings_path)?;
+    // Step 1: Ask whether the hook should run in the background
+    let async_hook = prompt_yes_no(
+        "Run hook in the background (async)? If no, Claude waits for scrubbing to finish",
+        true,
+    )?;
 
-    // Step 2: Write config
+    // Step 2: Install hook
+    let settings_path = claude_dir.join("settings.json");
+    install_hook(&settings_path, async_hook)?;
+
+    // Step 3: Write config
     println!();
     let config_path = claude_dir.join("scrubber.toml");
     write_config(&config_path)?;
@@ -68,7 +78,7 @@ fn run_init_inner() -> Result<()> {
 }
 
 #[allow(clippy::print_stdout)]
-fn install_hook(settings_path: &Path) -> Result<()> {
+fn install_hook(settings_path: &Path, async_hook: bool) -> Result<()> {
     let mut root: serde_json::Value = if settings_path.exists() {
         let data = std::fs::read_to_string(settings_path).context("reading settings.json")?;
         serde_json::from_str(&data).context("parsing settings.json")?
@@ -110,15 +120,16 @@ fn install_hook(settings_path: &Path) -> Result<()> {
 
     if already_installed {
         println!(
-            "1. Hook already present in {} {GREEN}\u{2713}{RESET}",
+            "2. Hook already present in {} {GREEN}\u{2713}{RESET}",
             settings_path.display(),
         );
     } else {
-        stop_array.push(build_hook_entry());
+        stop_array.push(build_hook_entry(async_hook));
         let pretty = serde_json::to_string_pretty(&root).context("serializing settings.json")?;
         std::fs::write(settings_path, pretty.as_bytes()).context("writing settings.json")?;
+        let mode = if async_hook { "async" } else { "sync" };
         println!(
-            "1. Hook installed in {} {GREEN}\u{2713}{RESET}",
+            "2. Hook installed ({mode}) in {} {GREEN}\u{2713}{RESET}",
             settings_path.display(),
         );
     }
@@ -148,11 +159,27 @@ fn write_config(config_path: &Path) -> Result<()> {
     std::fs::write(config_path, toml_str.as_bytes()).context("writing scrubber.toml")?;
 
     println!(
-        "2. Writing config to {} {GREEN}\u{2713}{RESET}",
+        "3. Writing config to {} {GREEN}\u{2713}{RESET}",
         config_path.display(),
     );
 
     Ok(())
+}
+
+#[allow(clippy::print_stdout)]
+fn prompt_yes_no(question: &str, default: bool) -> Result<bool> {
+    use std::io::Write;
+    let hint = if default { "[Y/n]" } else { "[y/N]" };
+    print!("{question} {hint} ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim().to_lowercase();
+    Ok(if answer.is_empty() {
+        default
+    } else {
+        answer.starts_with('y')
+    })
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -166,13 +193,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_hook_entry_has_correct_structure() {
-        let entry = build_hook_entry();
+    fn build_hook_entry_sync() {
+        let entry = build_hook_entry(false);
         let hooks = entry["hooks"].as_array().unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0]["type"], "command");
         assert_eq!(hooks[0]["command"], HOOK_COMMAND);
+        assert!(hooks[0].get("async").is_none());
         assert_eq!(entry["matcher"], "");
+    }
+
+    #[test]
+    fn build_hook_entry_async() {
+        let entry = build_hook_entry(true);
+        let hooks = entry["hooks"].as_array().unwrap();
+        assert_eq!(hooks[0]["async"], true);
     }
 
     #[test]
@@ -192,7 +227,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let settings_path = dir.path().join("settings.json");
 
-        install_hook(&settings_path).unwrap();
+        install_hook(&settings_path, false).unwrap();
 
         let data = std::fs::read_to_string(&settings_path).unwrap();
         let root: serde_json::Value = serde_json::from_str(&data).unwrap();
@@ -218,7 +253,7 @@ mod tests {
         )
         .unwrap();
 
-        install_hook(&settings_path).unwrap();
+        install_hook(&settings_path, false).unwrap();
 
         let data = std::fs::read_to_string(&settings_path).unwrap();
         let root: serde_json::Value = serde_json::from_str(&data).unwrap();
@@ -235,8 +270,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let settings_path = dir.path().join("settings.json");
 
-        install_hook(&settings_path).unwrap();
-        install_hook(&settings_path).unwrap();
+        install_hook(&settings_path, false).unwrap();
+        install_hook(&settings_path, false).unwrap();
 
         let data = std::fs::read_to_string(&settings_path).unwrap();
         let root: serde_json::Value = serde_json::from_str(&data).unwrap();

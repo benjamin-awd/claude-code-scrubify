@@ -33,12 +33,12 @@ fn run_status_inner() -> Result<()> {
     if settings_path.exists() {
         let data = std::fs::read_to_string(&settings_path)?;
         let root: serde_json::Value = serde_json::from_str(&data)?;
-        let installed = root
+        let hook_entry = root
             .get("hooks")
             .and_then(|h| h.get("Stop"))
             .and_then(|s| s.as_array())
-            .is_some_and(|arr| {
-                arr.iter().any(|entry| {
+            .and_then(|arr| {
+                arr.iter().find(|entry| {
                     entry
                         .get("hooks")
                         .and_then(|h| h.as_array())
@@ -50,8 +50,16 @@ fn run_status_inner() -> Result<()> {
                         })
                 })
             });
-        if installed {
-            println!("  Stop hook:  {GREEN}installed{RESET}");
+        if let Some(entry) = hook_entry {
+            let is_async = entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .and_then(|hooks| hooks.first())
+                .and_then(|h| h.get("async"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let mode = if is_async { "async" } else { "sync" };
+            println!("  Stop hook:  {GREEN}installed{RESET} ({mode})");
         } else {
             println!(
                 "  Stop hook:  {RED}not installed{RESET}  {DIM}(run `scrub-history init`){RESET}"
@@ -167,9 +175,7 @@ fn run_status_inner() -> Result<()> {
     let persistent = stats::load().unwrap_or_default();
 
     println!();
-    println!(
-        "{BOLD}Hook Latency{RESET}  {DIM}(how much scrub-history slows down each session end){RESET}"
-    );
+    println!("{BOLD}Stats{RESET}");
     if let Some(ref hook) = persistent.last_hook {
         println!(
             "  Last run:   {} ({})",
@@ -263,13 +269,6 @@ fn run_status_inner() -> Result<()> {
     } else {
         println!("  {DIM}No scan runs recorded yet{RESET}");
     }
-
-    println!();
-    println!("{BOLD}Backup{RESET}");
-    println!("  Strategy: atomic temp-file writes (no separate backups)");
-    println!(
-        "  {DIM}Files are replaced atomically — if a scrub fails, the original is preserved.{RESET}"
-    );
 
     println!();
     Ok(())

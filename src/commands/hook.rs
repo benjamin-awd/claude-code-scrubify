@@ -78,6 +78,7 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
     if redaction_count > 0 {
         info!(
             count = redaction_count,
+            duration_ms,
             file = %canonical.display(),
             "scrub-history: redacted secret(s)"
         );
