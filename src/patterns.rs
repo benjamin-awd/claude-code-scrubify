@@ -33,12 +33,15 @@ struct CustomPattern {
 impl SecretPattern {
     /// Returns true if the text contains at least one keyword (case-insensitive).
     /// If no keywords are defined, always returns true.
-    pub fn keyword_hit(&self, text: &str) -> bool {
+    ///
+    /// `text_lower` must be the pre-lowercased version of the text being
+    /// searched. Accepting it as a parameter avoids re-allocating a lowercase
+    /// copy for every pattern.
+    pub fn keyword_hit(&self, text_lower: &str) -> bool {
         if self.keywords.is_empty() {
             return true;
         }
-        let lower = text.to_lowercase();
-        self.keywords.iter().any(|kw| lower.contains(kw))
+        self.keywords.iter().any(|kw| text_lower.contains(kw))
     }
 }
 
@@ -480,7 +483,7 @@ mod tests {
             .iter()
             .find(|p| p.name == "aws-access-key")
             .unwrap();
-        assert!(aws.keyword_hit("contains AKIA somewhere"));
-        assert!(!aws.keyword_hit("no relevant keywords here"));
+        assert!(aws.keyword_hit(&"contains AKIA somewhere".to_lowercase()));
+        assert!(!aws.keyword_hit(&"no relevant keywords here".to_lowercase()));
     }
 }

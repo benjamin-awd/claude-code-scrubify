@@ -59,10 +59,11 @@ pub fn scrub_text(
     // Collect regex matches
     // Use quick_check to find which patterns matched, then keyword pre-filter,
     // then get exact spans.
+    let text_lower = text.to_lowercase();
     let matching_indices: Vec<_> = pattern_set.quick_check.matches(text).into_iter().collect();
     for idx in matching_indices {
         let pat = &pattern_set.patterns[idx];
-        if !pat.keyword_hit(text) {
+        if !pat.keyword_hit(&text_lower) {
             continue;
         }
         for caps in pat.regex.captures_iter(text) {
