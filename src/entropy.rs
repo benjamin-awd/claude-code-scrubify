@@ -1,11 +1,15 @@
-use regex::Regex;
 use std::sync::LazyLock;
 
+use regex::Regex;
+
 #[derive(Clone)]
-pub(crate) struct EntropyConfig {
+pub struct EntropyConfig {
     pub enabled: bool,
     pub threshold: f64,
     pub min_len: usize,
+    /// Additional regex patterns for tokens that should be excluded from
+    /// entropy-based detection (e.g. `"toolu_[A-Za-z0-9]{20,}"`).
+    pub exclude_patterns: Vec<String>,
 }
 
 impl Default for EntropyConfig {
@@ -14,11 +18,12 @@ impl Default for EntropyConfig {
             enabled: true,
             threshold: 4.5,
             min_len: 20,
+            exclude_patterns: Vec::new(),
         }
     }
 }
 
-pub(crate) struct EntropyMatch {
+pub struct EntropyMatch {
     pub start: usize,
     pub end: usize,
 }
@@ -40,7 +45,7 @@ static EXCLUSION_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/=_\-]{20,}").unwrap());
 
-pub(crate) fn shannon_entropy(s: &str) -> f64 {
+pub fn shannon_entropy(s: &str) -> f64 {
     #[allow(clippy::cast_precision_loss)] // precision loss irrelevant for entropy calc
     let len = s.len() as f64;
     if len == 0.0 {
@@ -62,7 +67,46 @@ pub(crate) fn shannon_entropy(s: &str) -> f64 {
         .sum()
 }
 
-pub(crate) fn find_high_entropy_tokens(text: &str, config: &EntropyConfig) -> Vec<EntropyMatch> {
+/// Compile user-supplied exclude patterns into a single optional `Regex`.
+/// Each pattern is anchored with `^(?:...)$` and combined with alternation.
+/// Returns `None` when the list is empty. Invalid patterns are logged and skipped.
+pub fn compile_exclude_patterns(patterns: &[String]) -> Option<Regex> {
+    if patterns.is_empty() {
+        return None;
+    }
+    // Validate each pattern individually so one bad pattern doesn't break the rest
+    let valid: Vec<&str> = patterns
+        .iter()
+        .filter(|p| {
+            if Regex::new(p).is_err() {
+                tracing::warn!(pattern = %p, "ignoring invalid entropy exclude pattern");
+                false
+            } else {
+                true
+            }
+        })
+        .map(String::as_str)
+        .collect();
+    if valid.is_empty() {
+        return None;
+    }
+    let combined = format!("^(?:{})$", valid.join("|"));
+    Regex::new(&combined).ok()
+}
+
+pub fn find_high_entropy_tokens(text: &str, config: &EntropyConfig) -> Vec<EntropyMatch> {
+    find_high_entropy_tokens_inner(
+        text,
+        config,
+        compile_exclude_patterns(&config.exclude_patterns).as_ref(),
+    )
+}
+
+fn find_high_entropy_tokens_inner(
+    text: &str,
+    config: &EntropyConfig,
+    user_exclusions: Option<&Regex>,
+) -> Vec<EntropyMatch> {
     if !config.enabled {
         return Vec::new();
     }
@@ -75,6 +119,11 @@ pub(crate) fn find_high_entropy_tokens(text: &str, config: &EntropyConfig) -> Ve
                 return None;
             }
             if EXCLUSION_RE.is_match(token) {
+                return None;
+            }
+            if let Some(re) = user_exclusions
+                && re.is_match(token)
+            {
                 return None;
             }
             let entropy = shannon_entropy(token);
@@ -128,6 +177,40 @@ mod tests {
         let text = "[REDACTED:aws-access-key]";
         let matches = find_high_entropy_tokens(text, &config);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn user_exclude_pattern_skips_matching_tokens() {
+        let config = EntropyConfig {
+            exclude_patterns: vec![r"toolu_[A-Za-z0-9]+".to_string()],
+            ..Default::default()
+        };
+        let text = "toolu_01WcKqikcTdC72gZJhSFfmYf";
+        let matches = find_high_entropy_tokens(text, &config);
+        assert!(
+            matches.is_empty(),
+            "user exclude pattern should suppress match"
+        );
+    }
+
+    #[test]
+    fn user_exclude_does_not_suppress_other_tokens() {
+        let config = EntropyConfig {
+            exclude_patterns: vec![r"toolu_[A-Za-z0-9]+".to_string()],
+            ..Default::default()
+        };
+        let text = "aB3kL9mN2pQ5rT8vX1yZ4cF7gH0jK6wE";
+        let matches = find_high_entropy_tokens(text, &config);
+        assert!(
+            !matches.is_empty(),
+            "non-matching token should still be detected"
+        );
+    }
+
+    #[test]
+    fn invalid_exclude_pattern_is_skipped() {
+        let re = compile_exclude_patterns(&[r"[invalid".to_string(), r"toolu_.+".to_string()]);
+        assert!(re.is_some(), "valid pattern should still compile");
     }
 
     #[test]

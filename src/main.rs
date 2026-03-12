@@ -1,14 +1,8 @@
-mod entropy;
-mod hook;
-mod jsonl;
-mod patterns;
-mod scan;
-mod scrubber;
+mod commands;
 
 use clap::{Parser, Subcommand};
+use scrub_history::entropy::EntropyConfig;
 use tracing_subscriber::EnvFilter;
-
-use crate::entropy::EntropyConfig;
 
 #[derive(Parser)]
 #[command(
@@ -40,6 +34,8 @@ struct Cli {
 enum Command {
     /// Run as a Claude Code Stop hook (reads session info from stdin)
     Hook,
+    /// Interactive setup wizard — installs hook and writes config
+    Init,
     /// Scan all JSONL files under ~/.claude/projects/
     Scan {
         /// Preview redactions without modifying files
@@ -50,6 +46,8 @@ enum Command {
         #[arg(long)]
         no_truncate: bool,
     },
+    /// Show hook config, last run stats, coverage, and performance info
+    Status,
 }
 
 fn main() {
@@ -72,6 +70,7 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .without_time()
         .with_target(false)
         .init();
@@ -83,10 +82,12 @@ fn main() {
     };
 
     match cli.command {
-        Command::Hook => hook::run_hook(&entropy_cfg),
+        Command::Init => commands::init::run_init(),
+        Command::Hook => commands::hook::run_hook(&entropy_cfg),
         Command::Scan {
             dry_run,
             no_truncate,
-        } => scan::run_scan(dry_run, no_truncate, &entropy_cfg),
+        } => commands::scan::run_scan(dry_run, no_truncate, &entropy_cfg),
+        Command::Status => commands::status::run_status(),
     }
 }

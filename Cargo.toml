@@ -13,7 +13,17 @@ tempfile = "3"
 rayon = "1"
 anyhow = "1"
 tracing = "0.1"
+sha2 = "0.10"
+toml = "0.8"
+colored = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "scrub_jsonl"
+harness = false
 
 [lints.rust]
 unsafe_code = "warn"

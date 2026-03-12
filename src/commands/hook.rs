@@ -1,11 +1,14 @@
-use serde::Deserialize;
 use std::io::Read;
 use std::path::PathBuf;
-use tracing::{error, info, warn};
+use std::time::Instant;
 
-use crate::entropy::EntropyConfig;
-use crate::jsonl;
-use crate::patterns::PatternSet;
+use scrub_history::allowlist;
+use scrub_history::entropy::EntropyConfig;
+use scrub_history::jsonl;
+use scrub_history::patterns::PatternSet;
+use scrub_history::stats;
+use serde::Deserialize;
+use tracing::{debug, error, info, warn};
 
 #[derive(Deserialize)]
 struct HookInput {
@@ -64,15 +67,52 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
     }
 
     let pattern_set = PatternSet::load(false)?;
+    let settings = allowlist::load_config()?;
+    let allowlist = settings.allowlist;
 
-    let result = jsonl::scrub_jsonl_file(&canonical, &pattern_set, entropy_cfg, false)?;
+    // Merge file-based exclude patterns into the CLI-supplied entropy config
+    let mut entropy_cfg = entropy_cfg.clone();
+    entropy_cfg
+        .exclude_patterns
+        .extend(settings.entropy_exclude_patterns);
 
-    if !result.redactions.is_empty() {
+    let start = Instant::now();
+    let result =
+        jsonl::scrub_jsonl_file(&canonical, &pattern_set, &entropy_cfg, &allowlist, false)?;
+    #[allow(clippy::cast_possible_truncation)] // duration in ms won't exceed u64
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    let redaction_count = result.redactions.len() as u64;
+    if redaction_count > 0 {
         info!(
-            count = result.redactions.len(),
+            count = redaction_count,
+            duration_ms,
             file = %canonical.display(),
             "scrub-history: redacted secret(s)"
         );
+        for r in &result.redactions {
+            let preview = super::scan::truncate_secret(&r.matched_text, 40);
+            debug!(
+                pattern = %r.pattern_name,
+                matched = preview,
+                "redacted"
+            );
+        }
+    }
+
+    // Persist stats for `scrub-history status`
+    if let Ok(mut persistent) = stats::load() {
+        let file_size_bytes = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
+        persistent.push_hook_run(stats::HookRunStats {
+            timestamp_epoch: stats::now_epoch(),
+            file: canonical.display().to_string(),
+            redactions: redaction_count,
+            duration_ms,
+            file_size_bytes,
+        });
+        if let Err(e) = stats::save(&persistent) {
+            warn!(error = %e, "failed to persist hook stats");
+        }
     }
 
     Ok(())

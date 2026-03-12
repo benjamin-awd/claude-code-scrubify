@@ -25,16 +25,16 @@ cargo install --path .
 
 ### Scan mode
 
-Scan all JSONL history files under `~/.claude/projects/` and redact secrets in place:
-
-```bash
-scrub-history scan
-```
-
 Preview what would be redacted without modifying files:
 
 ```bash
 scrub-history scan --dry-run
+```
+
+Scan all JSONL history files under `~/.claude/projects/` and redact secrets in place:
+
+```bash
+scrub-history scan
 ```
 
 ### Hook mode

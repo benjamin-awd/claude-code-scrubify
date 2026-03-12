@@ -1,15 +1,18 @@
-use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+use rayon::prelude::*;
+use scrub_history::allowlist;
+use scrub_history::entropy::EntropyConfig;
+use scrub_history::jsonl::{self, LineDiff};
+use scrub_history::patterns::PatternSet;
+use scrub_history::stats;
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
-
-use crate::entropy::EntropyConfig;
-use crate::jsonl::{self, LineDiff};
-use crate::patterns::PatternSet;
 
 pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
@@ -46,12 +49,27 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         }
     };
 
+    let settings = match allowlist::load_config() {
+        Ok(s) => s,
+        Err(e) => {
+            error!(error = %e, "failed to load config");
+            return;
+        }
+    };
+    let allowlist = settings.allowlist;
+    let mut entropy_cfg = entropy_cfg.clone();
+    entropy_cfg
+        .exclude_patterns
+        .extend(settings.entropy_exclude_patterns);
+    let entropy_cfg = &entropy_cfg;
+
     let files_modified = AtomicU64::new(0);
     let redaction_counts: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
     let errors = AtomicU64::new(0);
 
+    let scan_start = Instant::now();
     jsonl_files.par_iter().for_each(|path| {
-        match jsonl::scrub_jsonl_file(path, &pattern_set, entropy_cfg, dry_run) {
+        match jsonl::scrub_jsonl_file(path, &pattern_set, entropy_cfg, &allowlist, dry_run) {
             Ok(result) => {
                 if !result.redactions.is_empty() {
                     files_modified.fetch_add(1, Ordering::Relaxed);
@@ -80,6 +98,8 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         }
     });
 
+    #[allow(clippy::cast_possible_truncation)] // duration in ms won't exceed u64
+    let duration_ms = scan_start.elapsed().as_millis() as u64;
     let modified = files_modified.load(Ordering::Relaxed);
     let errs = errors.load(Ordering::Relaxed);
     let counts = redaction_counts.lock().unwrap();
@@ -88,6 +108,7 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         files_scanned = total_files,
         files_modified = modified,
         errors = errs,
+        duration_ms,
         "scan complete"
     );
 
@@ -98,12 +119,32 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
             info!(pattern = %name, count, "redactions by pattern");
         }
     }
+
+    // Persist stats for `scrub-history status`
+    let total_redactions: u64 = counts.values().sum();
+    if let Ok(mut persistent) = stats::load() {
+        persistent.last_scan = Some(stats::ScanRunStats {
+            timestamp_epoch: stats::now_epoch(),
+            files_scanned: total_files as u64,
+            files_modified: modified,
+            total_redactions,
+            errors: errs,
+            duration_ms,
+            dry_run,
+            redactions_by_pattern: counts.clone(),
+        });
+        if let Err(e) = stats::save(&persistent) {
+            warn!(error = %e, "failed to persist scan stats");
+        }
+    }
 }
 
 #[allow(clippy::print_stderr)] // intentional user-facing dry-run output
 fn print_unified_diff(path: &Path, diffs: &[LineDiff], no_truncate: bool) {
-    let path_str = path.display();
-    eprintln!("\x1b[1m  {path_str}\x1b[0m");
+    use colored::Colorize;
+
+    let path_str = path.display().to_string();
+    eprintln!("  {}", path_str.bold());
     for diff in diffs {
         for r in &diff.redactions {
             let preview = if no_truncate {
@@ -111,9 +152,12 @@ fn print_unified_diff(path: &Path, diffs: &[LineDiff], no_truncate: bool) {
             } else {
                 truncate_secret(&r.matched_text, 40)
             };
+            let redacted = format!("[REDACTED:{}]", r.pattern_name);
             eprintln!(
-                "    L{}: \x1b[31m{preview}\x1b[0m → \x1b[32m[REDACTED:{}]\x1b[0m",
-                diff.line_number, r.pattern_name,
+                "    L{}: {} → {}",
+                diff.line_number,
+                preview.red(),
+                redacted.green(),
             );
         }
     }
@@ -121,7 +165,7 @@ fn print_unified_diff(path: &Path, diffs: &[LineDiff], no_truncate: bool) {
 
 /// Show the first `max_len` chars, masking the middle portion to avoid
 /// printing full secrets to the terminal while still being identifiable.
-fn truncate_secret(s: &str, max_len: usize) -> String {
+pub(crate) fn truncate_secret(s: &str, max_len: usize) -> String {
     let s = s.replace('\n', "\\n").replace('\r', "\\r");
     if s.len() <= max_len {
         let visible = s.len().min(8);

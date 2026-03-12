@@ -1,31 +1,35 @@
-use anyhow::{Context, Result};
-use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
+
+use anyhow::{Context, Result};
+use serde_json::Value;
 use tempfile::NamedTempFile;
 use tracing::warn;
 
+use crate::allowlist::Allowlist;
 use crate::entropy::EntropyConfig;
+use crate::message;
 use crate::patterns::PatternSet;
-use crate::scrubber::{Redaction, scrub_text};
+use crate::scrubber::Redaction;
 
-pub(crate) struct LineDiff {
+pub struct LineDiff {
     pub line_number: usize, // 1-based
     pub redactions: Vec<Redaction>,
 }
 
-pub(crate) struct ScrubResult {
+pub struct ScrubResult {
     pub redactions: Vec<Redaction>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub lines_modified: usize,
     pub diffs: Vec<LineDiff>,
 }
 
-pub(crate) fn scrub_jsonl_file(
+pub fn scrub_jsonl_file(
     path: &Path,
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,
+    allowlist: &Allowlist,
     dry_run: bool,
 ) -> Result<ScrubResult> {
     let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -53,19 +57,38 @@ pub(crate) fn scrub_jsonl_file(
             continue;
         }
 
+        // Cheap pre-filter: skip lines for message types we know don't need
+        // scrubbing, without paying for a full JSON parse.
+        if is_skippable_message_type(&line) {
+            writeln!(writer, "{line}")?;
+            continue;
+        }
+
         if let Ok(mut value) = serde_json::from_str::<Value>(&line) {
-            let redactions = scrub_value(&mut value, pattern_set, entropy_cfg);
+            let redactions = message::scrub_value(&mut value, pattern_set, entropy_cfg, allowlist);
             if redactions.is_empty() {
                 writeln!(writer, "{line}")?;
             } else {
                 lines_modified += 1;
+                // Deduplicate: the same secret value may appear in multiple
+                // JSON fields within a single JSONL line (e.g. a command and
+                // its echoed output).  Count and report it only once per line.
+                let mut deduped = redactions;
+                deduped.sort_by(|a, b| {
+                    a.pattern_name
+                        .cmp(&b.pattern_name)
+                        .then_with(|| a.matched_text.cmp(&b.matched_text))
+                });
+                deduped.dedup_by(|a, b| {
+                    a.pattern_name == b.pattern_name && a.matched_text == b.matched_text
+                });
                 if dry_run {
                     diffs.push(LineDiff {
                         line_number,
-                        redactions: redactions.clone(),
+                        redactions: deduped.clone(),
                     });
                 }
-                all_redactions.extend(redactions);
+                all_redactions.extend(deduped);
                 let scrubbed = serde_json::to_string(&value)?;
                 writeln!(writer, "{scrubbed}")?;
             }
@@ -91,125 +114,20 @@ pub(crate) fn scrub_jsonl_file(
     })
 }
 
-fn scrub_value(
-    value: &mut Value,
-    pattern_set: &PatternSet,
-    entropy_cfg: &EntropyConfig,
-) -> Vec<Redaction> {
-    let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+/// Message types that `message::scrub_value` skips entirely.
+/// We detect them via cheap substring checks to avoid JSON parsing.
+const SKIP_PREFIXES: &[&str] = &[r#""type":"system""#, r#""type":"file-history-snapshot""#];
 
-    match msg_type {
-        "system" | "file-history-snapshot" => Vec::new(),
-        "user" => scrub_at_path(value, &["message", "content"], pattern_set, entropy_cfg),
-        "assistant" => scrub_assistant_message(value, pattern_set, entropy_cfg),
-        "progress" => scrub_at_path(
-            value,
-            &["data", "message", "message", "content"],
-            pattern_set,
-            entropy_cfg,
-        ),
-        "queue-operation" => scrub_at_path(value, &["content"], pattern_set, entropy_cfg),
-        _ => {
-            // Unknown type — recursively scrub all strings as a safety net
-            scrub_all_strings(value, pattern_set, entropy_cfg)
-        }
-    }
-}
-
-fn scrub_assistant_message(
-    value: &mut Value,
-    ps: &PatternSet,
-    ec: &EntropyConfig,
-) -> Vec<Redaction> {
-    let mut redactions = Vec::new();
-
-    // Navigate to .message.content which is an array
-    if let Some(content_array) = value
-        .get_mut("message")
-        .and_then(|m| m.get_mut("content"))
-        .and_then(|c| c.as_array_mut())
-    {
-        for item in content_array.iter_mut() {
-            // .text field
-            if let Some(Value::String(text)) = item.get_mut("text") {
-                let (scrubbed, r) = scrub_text(text, ps, ec);
-                if !r.is_empty() {
-                    *text = scrubbed;
-                    redactions.extend(r);
-                }
-            }
-
-            // .thinking field
-            if let Some(Value::String(thinking)) = item.get_mut("thinking") {
-                let (scrubbed, r) = scrub_text(thinking, ps, ec);
-                if !r.is_empty() {
-                    *thinking = scrubbed;
-                    redactions.extend(r);
-                }
-            }
-
-            // .input (tool_use) — recursively scrub all strings
-            if let Some(input) = item.get_mut("input") {
-                redactions.extend(scrub_all_strings(input, ps, ec));
-            }
-
-            // .content (tool_result) — recursively scrub all strings
-            if let Some(content) = item.get_mut("content") {
-                redactions.extend(scrub_all_strings(content, ps, ec));
-            }
-        }
-    }
-
-    redactions
-}
-
-fn scrub_at_path(
-    value: &mut Value,
-    path: &[&str],
-    ps: &PatternSet,
-    ec: &EntropyConfig,
-) -> Vec<Redaction> {
-    let mut current = value as &mut Value;
-    for &key in &path[..path.len().saturating_sub(1)] {
-        match current.get_mut(key) {
-            Some(v) => current = v,
-            None => return Vec::new(),
-        }
-    }
-
-    if let Some(&last_key) = path.last()
-        && let Some(target) = current.get_mut(last_key)
-    {
-        return scrub_all_strings(target, ps, ec);
-    }
-
-    Vec::new()
-}
-
-fn scrub_all_strings(value: &mut Value, ps: &PatternSet, ec: &EntropyConfig) -> Vec<Redaction> {
-    match value {
-        Value::String(s) => {
-            let (scrubbed, redactions) = scrub_text(s, ps, ec);
-            if !redactions.is_empty() {
-                *s = scrubbed;
-            }
-            redactions
-        }
-        Value::Array(arr) => arr
-            .iter_mut()
-            .flat_map(|v| scrub_all_strings(v, ps, ec))
-            .collect(),
-        Value::Object(map) => map
-            .values_mut()
-            .flat_map(|v| scrub_all_strings(v, ps, ec))
-            .collect(),
-        _ => Vec::new(),
-    }
+fn is_skippable_message_type(line: &str) -> bool {
+    // Only inspect the first 60 bytes — the "type" field is always near the start.
+    let prefix = &line[..line.len().min(60)];
+    SKIP_PREFIXES.iter().any(|p| prefix.contains(p))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn make_test_file(content: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         write!(f, "{content}").unwrap();
@@ -217,17 +135,24 @@ mod tests {
         f
     }
 
+    fn test_fixtures() -> (PatternSet, EntropyConfig, Allowlist) {
+        (
+            PatternSet::load(true).unwrap(),
+            EntropyConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            Allowlist::empty(),
+        )
+    }
+
     #[test]
     fn scrubs_user_message() {
         let line = r#"{"type":"user","message":{"content":"my token is ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
         let file = make_test_file(&format!("{line}\n"));
-        let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig {
-            enabled: false,
-            ..Default::default()
-        };
+        let (ps, ec, al) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, false).unwrap();
         assert_eq!(result.lines_modified, 1);
         assert!(!result.redactions.is_empty());
 
@@ -241,13 +166,9 @@ mod tests {
         let line = r#"{"type":"user","message":{"content":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
         let original = format!("{line}\n");
         let file = make_test_file(&original);
-        let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig {
-            enabled: false,
-            ..Default::default()
-        };
+        let (ps, ec, al) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, true).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, true).unwrap();
         assert!(!result.redactions.is_empty());
 
         let content = fs::read_to_string(file.path()).unwrap();
@@ -273,13 +194,9 @@ mod tests {
             "\n",
         );
         let file = make_test_file(lines);
-        let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig {
-            enabled: false,
-            ..Default::default()
-        };
+        let (ps, ec, al) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, true).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, true).unwrap();
         assert_eq!(result.diffs.len(), 2);
         assert_eq!(result.diffs[0].line_number, 2);
         assert_eq!(result.diffs[1].line_number, 4);
@@ -289,13 +206,9 @@ mod tests {
     fn non_dry_run_does_not_collect_diffs() {
         let line = r#"{"type":"user","message":{"content":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
         let file = make_test_file(&format!("{line}\n"));
-        let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig {
-            enabled: false,
-            ..Default::default()
-        };
+        let (ps, ec, al) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, false).unwrap();
         assert!(!result.redactions.is_empty());
         assert!(
             result.diffs.is_empty(),
@@ -307,13 +220,9 @@ mod tests {
     fn handles_malformed_json() {
         let content = "not json at all\n{\"type\":\"system\"}\n";
         let file = make_test_file(content);
-        let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig {
-            enabled: false,
-            ..Default::default()
-        };
+        let (ps, ec, al) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false);
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, false);
         assert!(result.is_ok());
     }
 
@@ -321,13 +230,9 @@ mod tests {
     fn skips_system_type() {
         let line = r#"{"type":"system","content":"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}"#;
         let file = make_test_file(&format!("{line}\n"));
-        let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig {
-            enabled: false,
-            ..Default::default()
-        };
+        let (ps, ec, al) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, false).unwrap();
         assert!(result.redactions.is_empty());
     }
 
@@ -335,16 +240,69 @@ mod tests {
     fn scrubs_assistant_tool_use() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"command":"echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}]}}"#;
         let file = make_test_file(&format!("{line}\n"));
-        let ps = PatternSet::load(true).unwrap();
-        let ec = EntropyConfig {
-            enabled: false,
-            ..Default::default()
-        };
+        let (ps, ec, al) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, false).unwrap();
         assert!(!result.redactions.is_empty());
 
         let content = fs::read_to_string(file.path()).unwrap();
         assert!(content.contains("[REDACTED:github-token]"));
+    }
+
+    #[test]
+    fn redacts_sensitive_field_by_key_name() {
+        // The value doesn't match any regex pattern, but the key "password" triggers redaction
+        let line =
+            r#"{"type":"user","message":{"content":{"password":"not_a_known_pattern_value"}}}"#;
+        let file = make_test_file(&format!("{line}\n"));
+        let (ps, ec, al) = test_fixtures();
+
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, false).unwrap();
+        assert!(!result.redactions.is_empty());
+
+        let content = fs::read_to_string(file.path()).unwrap();
+        assert!(content.contains("[REDACTED:sensitive-field]"));
+        assert!(!content.contains("not_a_known_pattern_value"));
+    }
+
+    #[test]
+    fn deduplicates_same_secret_across_fields() {
+        // Same token appears in both .text and .input within the same JSONL line.
+        // The redaction should be applied to both, but counted/reported only once.
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"token {token}"}},{{"type":"tool_use","input":{{"command":"echo {token}"}}}}]}}}}"#,
+        );
+        let file = make_test_file(&format!("{line}\n"));
+        let (ps, ec, al) = test_fixtures();
+
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, true).unwrap();
+        // Both occurrences are redacted in the file
+        assert_eq!(result.lines_modified, 1);
+        // But deduplicated: same pattern + same matched_text = 1 redaction
+        assert_eq!(
+            result.redactions.len(),
+            1,
+            "same secret in multiple fields should be deduplicated"
+        );
+        assert_eq!(result.diffs.len(), 1);
+        assert_eq!(
+            result.diffs[0].redactions.len(),
+            1,
+            "diff should also be deduplicated"
+        );
+    }
+
+    #[test]
+    fn skips_short_sensitive_field_values() {
+        let line = r#"{"type":"user","message":{"content":{"password":"short"}}}"#;
+        let file = make_test_file(&format!("{line}\n"));
+        let (ps, ec, al) = test_fixtures();
+
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, false).unwrap();
+        assert!(
+            result.redactions.is_empty(),
+            "short values under sensitive keys should not be redacted"
+        );
     }
 }
