@@ -22,7 +22,10 @@ fn run_status_inner() -> Result<()> {
     let claude_dir = home.join(".claude");
 
     println!();
-    println!("{BOLD}scrub-history status{RESET}");
+    println!(
+        "{BOLD}scrub-history{RESET} {DIM}v{}{RESET}",
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
 
     println!("{BOLD}Hook Configuration{RESET}");
