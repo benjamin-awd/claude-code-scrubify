@@ -15,6 +15,14 @@ Claude Code stores conversation transcripts as JSONL files under `~/.claude/proj
 - **Dry-run** — preview what would be redacted before modifying anything
 - **Safe writes** — atomic temp-file writes prevent corruption
 
+## Status dashboard
+
+```
+scrub-history status
+```
+
+<img src="docs/status.png" alt="scrub-history status output" width="500">
+
 ## Install
 
 ```bash
