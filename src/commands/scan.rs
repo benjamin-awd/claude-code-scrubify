@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use scrub_history::allowlist;
 use scrub_history::cache;
@@ -102,6 +103,15 @@ pub(crate) fn run_scan(
     let redaction_counts: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
     let errors = AtomicU64::new(0);
 
+    let pb = ProgressBar::new(files_to_scan as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{bar:30.cyan/dim}] {pos}/{len} files ({elapsed} elapsed, {eta} remaining)",
+        )
+        .expect("valid template")
+        .progress_chars("=> "),
+    );
+
     let scan_start = Instant::now();
     uncached_files.par_iter().for_each(|path| {
         match jsonl::scrub_jsonl_file(
@@ -119,14 +129,16 @@ pub(crate) fn run_scan(
                     for r in &result.redactions {
                         *counts.entry(r.pattern_name.clone()).or_insert(0) += 1;
                     }
-                    info!(
-                        count = result.redactions.len(),
-                        file = %path.display(),
-                        "redaction(s) found"
-                    );
-                    if dry_run && !result.diffs.is_empty() {
-                        print_unified_diff(path, &result.diffs, no_truncate);
-                    }
+                    pb.suspend(|| {
+                        info!(
+                            count = result.redactions.len(),
+                            file = %path.display(),
+                            "redaction(s) found"
+                        );
+                        if dry_run && !result.diffs.is_empty() {
+                            print_unified_diff(path, &result.diffs, no_truncate);
+                        }
+                    });
                     for r in &result.redactions {
                         let preview = truncate_secret(&r.matched_text, 40);
                         debug!(pattern = %r.pattern_name, preview, "matched secret");
@@ -134,11 +146,15 @@ pub(crate) fn run_scan(
                 }
             }
             Err(e) => {
-                error!(file = %path.display(), error = %e, "failed to process file");
+                pb.suspend(|| {
+                    error!(file = %path.display(), error = %e, "failed to process file");
+                });
                 errors.fetch_add(1, Ordering::Relaxed);
             }
         }
+        pb.inc(1);
     });
+    pb.finish_and_clear();
 
     #[allow(clippy::cast_possible_truncation)] // duration in ms won't exceed u64
     let duration_ms = scan_start.elapsed().as_millis() as u64;

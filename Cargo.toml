@@ -17,6 +17,7 @@ sha2 = "0.10"
 toml = "0.8"
 colored = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+indicatif = "0.18.4"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
