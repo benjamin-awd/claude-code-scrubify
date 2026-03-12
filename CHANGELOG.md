@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/benjamin-awd/claude-code-scrubify/compare/scrub-history-v0.2.0...scrub-history-v0.3.0) (2026-03-12)
+
+
+### Features
+
+* add blacklist feature for always-redacting configured strings ([6370dfe](https://github.com/benjamin-awd/claude-code-scrubify/commit/6370dfe5b83ea893fb326d4926a3d94296aca380))
+* add hash-based blacklist for exact-match redaction without plaintext ([a9cab6a](https://github.com/benjamin-awd/claude-code-scrubify/commit/a9cab6ac43fe631cb0203e745d412a077e4f37b8))
+* add indicatif progress bar to scan command ([906c883](https://github.com/benjamin-awd/claude-code-scrubify/commit/906c8836357f870b7dff3333be10c5a1617e1247))
+* add mtime-based scan cache to skip unchanged files ([33fafaa](https://github.com/benjamin-awd/claude-code-scrubify/commit/33fafaacd57f8cc1b4794d90a23163289a7525ea))
+* add sparkline visualizations for latency and redactions in status ([d8f5330](https://github.com/benjamin-awd/claude-code-scrubify/commit/d8f5330668485671bbd2f55e8882ee21bbfc4b85))
+* show version in status command header ([c64a948](https://github.com/benjamin-awd/claude-code-scrubify/commit/c64a948a486fa1cd92e2f4a7dd36111ff17c3781))
+
+
+### Bug Fixes
+
+* speed up status command and shorten file path display ([5b23b00](https://github.com/benjamin-awd/claude-code-scrubify/commit/5b23b00100bfcf73f927788892aaad7993bf2104))
+
 ## [0.2.0](https://github.com/benjamin-awd/claude-code-scrubify/compare/scrub-history-v0.1.0...scrub-history-v0.2.0) (2026-03-12)
 
 
