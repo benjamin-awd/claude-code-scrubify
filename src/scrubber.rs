@@ -282,8 +282,8 @@ mod tests {
     fn skips_short_matches() {
         let ps = test_pattern_set();
         // "SK" + 32 hex chars = 34 chars, should be redacted
-        let long_input = "key: SK_FAKE_TEST_KEY_REPLACED";
-        let (_, redactions) = scrub_text(long_input, &ps, &no_entropy(), &no_allowlist());
+        let long_input = format!("key: SK{}", "1234567890abcdef".repeat(2));
+        let (_, redactions) = scrub_text(&long_input, &ps, &no_entropy(), &no_allowlist());
         assert!(!redactions.is_empty(), "long twilio key should be redacted");
     }
 
