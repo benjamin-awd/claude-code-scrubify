@@ -36,14 +36,14 @@ const SENSITIVE_KEYS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone)]
-pub(crate) struct Redaction {
+pub struct Redaction {
     pub pattern_name: String,
     pub start: usize,
     pub end: usize,
     pub matched_text: String,
 }
 
-pub(crate) fn scrub_text(
+pub fn scrub_text(
     text: &str,
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,
@@ -165,7 +165,7 @@ fn is_sensitive_key(key: &str) -> bool {
 }
 
 /// Recursively scrub all string values in a JSON value tree.
-pub(crate) fn scrub_all_strings(
+pub fn scrub_all_strings(
     value: &mut Value,
     ps: &PatternSet,
     ec: &EntropyConfig,

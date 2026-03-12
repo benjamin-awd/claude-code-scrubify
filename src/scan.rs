@@ -7,10 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
-use crate::allowlist::Allowlist;
-use crate::entropy::EntropyConfig;
-use crate::jsonl::{self, LineDiff};
-use crate::patterns::PatternSet;
+use scrub_history::allowlist::Allowlist;
+use scrub_history::entropy::EntropyConfig;
+use scrub_history::jsonl::{self, LineDiff};
+use scrub_history::patterns::PatternSet;
 
 pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {

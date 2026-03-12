@@ -19,14 +19,14 @@ struct AllowlistConfig {
     hashes: Vec<String>,
 }
 
-pub(crate) struct Allowlist {
+pub struct Allowlist {
     hashes: HashSet<String>,
 }
 
 impl Allowlist {
     /// Load the allowlist from `~/.claude/scrubber.toml`.
     /// Returns an empty allowlist if the file doesn't exist.
-    pub(crate) fn load() -> Result<Self> {
+    pub fn load() -> Result<Self> {
         let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
             return Ok(Self::empty());
         };
@@ -48,14 +48,14 @@ impl Allowlist {
         Ok(Allowlist { hashes })
     }
 
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Allowlist {
             hashes: HashSet::new(),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn from_hashes(hashes: Vec<String>) -> Self {
+    pub fn from_hashes(hashes: Vec<String>) -> Self {
         Allowlist {
             hashes: hashes.into_iter().map(|h| h.to_lowercase()).collect(),
         }
@@ -63,7 +63,7 @@ impl Allowlist {
 
     /// Returns true if the given value is allowlisted (its SHA-256 hash is in
     /// the set).
-    pub(crate) fn is_allowed(&self, value: &str) -> bool {
+    pub fn is_allowed(&self, value: &str) -> bool {
         if self.hashes.is_empty() {
             return false;
         }
@@ -73,7 +73,7 @@ impl Allowlist {
 }
 
 /// Compute the lowercase hex SHA-256 digest of a string.
-pub(crate) fn sha256_hex(value: &str) -> String {
+pub fn sha256_hex(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     format!("{:x}", hasher.finalize())

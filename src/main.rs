@@ -1,16 +1,10 @@
-mod allowlist;
-mod entropy;
 mod hook;
-mod jsonl;
-mod message;
-mod patterns;
 mod scan;
-mod scrubber;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use crate::entropy::EntropyConfig;
+use scrub_history::entropy::EntropyConfig;
 
 #[derive(Parser)]
 #[command(

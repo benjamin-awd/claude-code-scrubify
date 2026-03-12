@@ -10,7 +10,7 @@ use crate::scrubber::{Redaction, scrub_all_strings, scrub_text};
 /// Understands the Claude conversation schema (`type` field) and selectively
 /// scrubs the paths that carry user/assistant content while skipping
 /// system metadata.
-pub(crate) fn scrub_value(
+pub fn scrub_value(
     value: &mut Value,
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,

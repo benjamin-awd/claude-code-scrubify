@@ -12,19 +12,19 @@ use crate::message;
 use crate::patterns::PatternSet;
 use crate::scrubber::Redaction;
 
-pub(crate) struct LineDiff {
+pub struct LineDiff {
     pub line_number: usize, // 1-based
     pub redactions: Vec<Redaction>,
 }
 
-pub(crate) struct ScrubResult {
+pub struct ScrubResult {
     pub redactions: Vec<Redaction>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub lines_modified: usize,
     pub diffs: Vec<LineDiff>,
 }
 
-pub(crate) fn scrub_jsonl_file(
+pub fn scrub_jsonl_file(
     path: &Path,
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,

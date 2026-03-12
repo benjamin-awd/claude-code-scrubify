@@ -17,6 +17,13 @@ sha2 = "0.10"
 toml = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "scrub_jsonl"
+harness = false
+
 [lints.rust]
 unsafe_code = "warn"
 unreachable_pub = "warn"

@@ -3,10 +3,10 @@ use std::io::Read;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
-use crate::allowlist::Allowlist;
-use crate::entropy::EntropyConfig;
-use crate::jsonl;
-use crate::patterns::PatternSet;
+use scrub_history::allowlist::Allowlist;
+use scrub_history::entropy::EntropyConfig;
+use scrub_history::jsonl;
+use scrub_history::patterns::PatternSet;
 
 #[derive(Deserialize)]
 struct HookInput {

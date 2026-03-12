@@ -2,7 +2,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 #[derive(Clone)]
-pub(crate) struct EntropyConfig {
+pub struct EntropyConfig {
     pub enabled: bool,
     pub threshold: f64,
     pub min_len: usize,
@@ -18,7 +18,7 @@ impl Default for EntropyConfig {
     }
 }
 
-pub(crate) struct EntropyMatch {
+pub struct EntropyMatch {
     pub start: usize,
     pub end: usize,
 }
@@ -40,7 +40,7 @@ static EXCLUSION_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/=_\-]{20,}").unwrap());
 
-pub(crate) fn shannon_entropy(s: &str) -> f64 {
+pub fn shannon_entropy(s: &str) -> f64 {
     #[allow(clippy::cast_precision_loss)] // precision loss irrelevant for entropy calc
     let len = s.len() as f64;
     if len == 0.0 {
@@ -62,7 +62,7 @@ pub(crate) fn shannon_entropy(s: &str) -> f64 {
         .sum()
 }
 
-pub(crate) fn find_high_entropy_tokens(text: &str, config: &EntropyConfig) -> Vec<EntropyMatch> {
+pub fn find_high_entropy_tokens(text: &str, config: &EntropyConfig) -> Vec<EntropyMatch> {
     if !config.enabled {
         return Vec::new();
     }

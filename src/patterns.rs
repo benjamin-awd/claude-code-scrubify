@@ -3,7 +3,7 @@ use regex::{Regex, RegexSet};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-pub(crate) struct SecretPattern {
+pub struct SecretPattern {
     pub name: String,
     pub regex: Regex,
     /// Cheap substring keywords — if non-empty, at least one must appear in the
@@ -15,7 +15,7 @@ pub(crate) struct SecretPattern {
     pub secret_group: Option<usize>,
 }
 
-pub(crate) struct PatternSet {
+pub struct PatternSet {
     pub patterns: Vec<SecretPattern>,
     pub quick_check: RegexSet,
 }
@@ -33,7 +33,7 @@ struct CustomPattern {
 impl SecretPattern {
     /// Returns true if the text contains at least one keyword (case-insensitive).
     /// If no keywords are defined, always returns true.
-    pub(crate) fn keyword_hit(&self, text: &str) -> bool {
+    pub fn keyword_hit(&self, text: &str) -> bool {
         if self.keywords.is_empty() {
             return true;
         }
@@ -43,7 +43,7 @@ impl SecretPattern {
 }
 
 impl PatternSet {
-    pub(crate) fn load(skip_custom: bool) -> Result<Self> {
+    pub fn load(skip_custom: bool) -> Result<Self> {
         let mut patterns = built_in_patterns()?;
 
         if !skip_custom && let Some(custom) = load_custom_patterns()? {
