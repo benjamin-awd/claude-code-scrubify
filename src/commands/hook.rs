@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use scrub_history::allowlist::Allowlist;
 use scrub_history::entropy::EntropyConfig;
@@ -82,6 +82,13 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
             file = %canonical.display(),
             "scrub-history: redacted secret(s)"
         );
+        for r in &result.redactions {
+            debug!(
+                pattern = %r.pattern_name,
+                matched = %r.matched_text,
+                "redacted"
+            );
+        }
     }
 
     // Persist stats for `scrub-history status`
