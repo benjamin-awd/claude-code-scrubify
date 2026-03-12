@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use serde_json::Value;
 
-use crate::allowlist::Allowlist;
+use crate::allowlist::{Allowlist, Blacklist};
 use crate::entropy::{EntropyConfig, find_high_entropy_tokens};
 use crate::patterns::PatternSet;
 
@@ -50,9 +50,14 @@ pub fn scrub_text(
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,
     allowlist: &Allowlist,
+    blacklist: &Blacklist,
 ) -> (String, Vec<Redaction>) {
-    // Fast bail-out: if no regex matches at all and entropy is disabled, return early
-    if !pattern_set.quick_check.is_match(text) && !entropy_cfg.enabled {
+    // Fast bail-out: if no regex matches at all, entropy is disabled, and no
+    // blacklist entries match, return early
+    if !pattern_set.quick_check.is_match(text)
+        && !entropy_cfg.enabled
+        && !blacklist.contains_any(text)
+    {
         return (text.to_string(), Vec::new());
     }
 
@@ -115,6 +120,29 @@ pub fn scrub_text(
                 matched_text: String::new(),
             });
         }
+    }
+
+    // Collect blacklist matches
+    for (bl_start, bl_end) in blacklist.find_all_spans(text) {
+        // Skip if already covered by a regex/entropy span
+        let already_covered = spans.iter().any(|s| s.start <= bl_start && s.end >= bl_end);
+        if already_covered {
+            continue;
+        }
+        // Skip if the matched text is allowlisted
+        if allowlist.is_allowed(&text[bl_start..bl_end]) {
+            continue;
+        }
+        // Skip already-redacted placeholders for idempotency
+        if text[bl_start..bl_end].starts_with("[REDACTED:") {
+            continue;
+        }
+        spans.push(Redaction {
+            pattern_name: "blacklist".to_string(),
+            start: bl_start,
+            end: bl_end,
+            matched_text: String::new(),
+        });
     }
 
     if spans.is_empty() {
@@ -188,8 +216,9 @@ pub fn scrub_all_strings(
     ps: &PatternSet,
     ec: &EntropyConfig,
     al: &Allowlist,
+    bl: &Blacklist,
 ) -> Vec<Redaction> {
-    scrub_all_strings_inner(value, ps, ec, al, false)
+    scrub_all_strings_inner(value, ps, ec, al, bl, false)
 }
 
 fn scrub_all_strings_inner(
@@ -197,6 +226,7 @@ fn scrub_all_strings_inner(
     ps: &PatternSet,
     ec: &EntropyConfig,
     al: &Allowlist,
+    bl: &Blacklist,
     force_redact: bool,
 ) -> Vec<Redaction> {
     match value {
@@ -216,7 +246,7 @@ fn scrub_all_strings_inner(
                 *s = "[REDACTED:sensitive-field]".to_string();
                 return vec![redaction];
             }
-            let (scrubbed, redactions) = scrub_text(s, ps, ec, al);
+            let (scrubbed, redactions) = scrub_text(s, ps, ec, al, bl);
             if !redactions.is_empty() {
                 *s = scrubbed;
             }
@@ -224,13 +254,13 @@ fn scrub_all_strings_inner(
         }
         Value::Array(arr) => arr
             .iter_mut()
-            .flat_map(|v| scrub_all_strings_inner(v, ps, ec, al, force_redact))
+            .flat_map(|v| scrub_all_strings_inner(v, ps, ec, al, bl, force_redact))
             .collect(),
         Value::Object(map) => {
             let mut redactions = Vec::new();
             for (key, val) in map.iter_mut() {
                 let sensitive = is_sensitive_key(key);
-                redactions.extend(scrub_all_strings_inner(val, ps, ec, al, sensitive));
+                redactions.extend(scrub_all_strings_inner(val, ps, ec, al, bl, sensitive));
             }
             redactions
         }
@@ -257,10 +287,20 @@ mod tests {
         Allowlist::empty()
     }
 
+    fn no_blacklist() -> Blacklist {
+        Blacklist::empty()
+    }
+
     #[test]
     fn no_secrets() {
         let ps = test_pattern_set();
-        let (result, redactions) = scrub_text("hello world", &ps, &no_entropy(), &no_allowlist());
+        let (result, redactions) = scrub_text(
+            "hello world",
+            &ps,
+            &no_entropy(),
+            &no_allowlist(),
+            &no_blacklist(),
+        );
         assert_eq!(result, "hello world");
         assert!(redactions.is_empty());
     }
@@ -269,7 +309,8 @@ mod tests {
     fn redacts_github_token() {
         let ps = test_pattern_set();
         let input = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
-        let (result, redactions) = scrub_text(input, &ps, &no_entropy(), &no_allowlist());
+        let (result, redactions) =
+            scrub_text(input, &ps, &no_entropy(), &no_allowlist(), &no_blacklist());
         assert!(result.contains("[REDACTED:github-token]"));
         assert!(!result.contains("ghp_"));
         assert_eq!(redactions.len(), 1);
@@ -279,7 +320,8 @@ mod tests {
     fn redacts_multiple_secrets() {
         let ps = test_pattern_set();
         let input = "key1: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl and key2: sk-ant-abcdefghijklmnopqrstuvwxyz";
-        let (result, redactions) = scrub_text(input, &ps, &no_entropy(), &no_allowlist());
+        let (result, redactions) =
+            scrub_text(input, &ps, &no_entropy(), &no_allowlist(), &no_blacklist());
         assert!(result.contains("[REDACTED:github-token]"));
         assert!(result.contains("[REDACTED:anthropic-key]"));
         assert_eq!(redactions.len(), 2);
@@ -289,9 +331,15 @@ mod tests {
     fn idempotent() {
         let ps = test_pattern_set();
         let input = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
-        let (first_pass, _) = scrub_text(input, &ps, &no_entropy(), &no_allowlist());
-        let (second_pass, redactions) =
-            scrub_text(&first_pass, &ps, &no_entropy(), &no_allowlist());
+        let (first_pass, _) =
+            scrub_text(input, &ps, &no_entropy(), &no_allowlist(), &no_blacklist());
+        let (second_pass, redactions) = scrub_text(
+            &first_pass,
+            &ps,
+            &no_entropy(),
+            &no_allowlist(),
+            &no_blacklist(),
+        );
         assert_eq!(first_pass, second_pass);
         assert!(redactions.is_empty());
     }
@@ -300,10 +348,17 @@ mod tests {
     fn idempotent_secret_group() {
         let ps = test_pattern_set();
         let input = r#"password = "my_super_secret_password""#;
-        let (first_pass, r1) = scrub_text(input, &ps, &no_entropy(), &no_allowlist());
+        let (first_pass, r1) =
+            scrub_text(input, &ps, &no_entropy(), &no_allowlist(), &no_blacklist());
         assert_eq!(r1.len(), 1);
         // Second pass on already-redacted text should find nothing
-        let (second_pass, r2) = scrub_text(&first_pass, &ps, &no_entropy(), &no_allowlist());
+        let (second_pass, r2) = scrub_text(
+            &first_pass,
+            &ps,
+            &no_entropy(),
+            &no_allowlist(),
+            &no_blacklist(),
+        );
         assert_eq!(first_pass, second_pass);
         assert!(
             r2.is_empty(),
@@ -316,7 +371,13 @@ mod tests {
         let ps = test_pattern_set();
         // "SK" + 32 hex chars = 34 chars, should be redacted
         let long_input = format!("key: SK{}", "1234567890abcdef".repeat(2));
-        let (_, redactions) = scrub_text(&long_input, &ps, &no_entropy(), &no_allowlist());
+        let (_, redactions) = scrub_text(
+            &long_input,
+            &ps,
+            &no_entropy(),
+            &no_allowlist(),
+            &no_blacklist(),
+        );
         assert!(!redactions.is_empty(), "long twilio key should be redacted");
     }
 
@@ -324,7 +385,8 @@ mod tests {
     fn secret_group_redacts_only_value() {
         let ps = test_pattern_set();
         let input = r#"password = "my_super_secret_password""#;
-        let (result, redactions) = scrub_text(input, &ps, &no_entropy(), &no_allowlist());
+        let (result, redactions) =
+            scrub_text(input, &ps, &no_entropy(), &no_allowlist(), &no_blacklist());
         // The key name should be preserved, only the value redacted
         assert!(
             result.contains("password"),
@@ -342,7 +404,7 @@ mod tests {
         let hash = crate::allowlist::sha256_hex(token);
         let al = Allowlist::from_hashes(vec![hash]);
         let input = format!("token: {token}");
-        let (result, redactions) = scrub_text(&input, &ps, &no_entropy(), &al);
+        let (result, redactions) = scrub_text(&input, &ps, &no_entropy(), &al, &no_blacklist());
         assert!(result.contains(token), "allowlisted value should remain");
         assert!(redactions.is_empty());
     }
@@ -352,8 +414,87 @@ mod tests {
         let ps = test_pattern_set();
         let cfg = EntropyConfig::default();
         let input = "secret=aB3kL9mN2pQ5rT8vX1yZ4cF7gH0jK6wE";
-        let (result, redactions) = scrub_text(input, &ps, &cfg, &no_allowlist());
+        let (result, redactions) = scrub_text(input, &ps, &cfg, &no_allowlist(), &no_blacklist());
         // Should detect via entropy or regex
         assert!(!redactions.is_empty() || result != input);
+    }
+
+    // --- Blacklist tests ---
+
+    #[test]
+    fn blacklist_redacts_exact_string() {
+        let ps = test_pattern_set();
+        let bl = Blacklist::from_strings(vec!["foobar123"]);
+        let input = "some text with foobar123 in it";
+        let (result, redactions) = scrub_text(input, &ps, &no_entropy(), &no_allowlist(), &bl);
+        assert!(result.contains("[REDACTED:blacklist]"));
+        assert!(!result.contains("foobar123"));
+        assert_eq!(redactions.len(), 1);
+        assert_eq!(redactions[0].pattern_name, "blacklist");
+    }
+
+    #[test]
+    fn blacklist_bypasses_fast_bailout() {
+        let ps = test_pattern_set();
+        let bl = Blacklist::from_strings(vec!["foobar123"]);
+        // This text has no regex matches and no entropy — only blacklist
+        let input = "plain text foobar123 here";
+        let (result, redactions) = scrub_text(input, &ps, &no_entropy(), &no_allowlist(), &bl);
+        assert!(
+            !redactions.is_empty(),
+            "blacklist should bypass fast bail-out"
+        );
+        assert!(result.contains("[REDACTED:blacklist]"));
+    }
+
+    #[test]
+    fn blacklist_multiple_occurrences() {
+        let ps = test_pattern_set();
+        let bl = Blacklist::from_strings(vec!["foobar123"]);
+        let input = "first foobar123 second foobar123 end";
+        let (result, redactions) = scrub_text(input, &ps, &no_entropy(), &no_allowlist(), &bl);
+        assert_eq!(redactions.len(), 2);
+        assert!(!result.contains("foobar123"));
+    }
+
+    #[test]
+    fn allowlist_overrides_blacklist() {
+        let ps = test_pattern_set();
+        let bl = Blacklist::from_strings(vec!["foobar123"]);
+        let hash = crate::allowlist::sha256_hex("foobar123");
+        let al = Allowlist::from_hashes(vec![hash]);
+        let input = "text foobar123 here";
+        let (result, redactions) = scrub_text(input, &ps, &no_entropy(), &al, &bl);
+        assert!(
+            result.contains("foobar123"),
+            "allowlisted should not be redacted"
+        );
+        assert!(redactions.is_empty());
+    }
+
+    #[test]
+    fn blacklist_overlap_with_regex_no_double_redact() {
+        let ps = test_pattern_set();
+        // Use a string that is also a GitHub token
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
+        let bl = Blacklist::from_strings(vec![token]);
+        let input = format!("token: {token}");
+        let (result, redactions) = scrub_text(&input, &ps, &no_entropy(), &no_allowlist(), &bl);
+        // Should be redacted exactly once (by regex, since it matches first)
+        assert_eq!(redactions.len(), 1);
+        assert!(result.contains("[REDACTED:"));
+        assert!(!result.contains(token));
+    }
+
+    #[test]
+    fn blacklist_idempotent() {
+        let ps = test_pattern_set();
+        let bl = Blacklist::from_strings(vec!["foobar123"]);
+        let input = "text foobar123 here";
+        let (first_pass, _) = scrub_text(input, &ps, &no_entropy(), &no_allowlist(), &bl);
+        let (second_pass, redactions) =
+            scrub_text(&first_pass, &ps, &no_entropy(), &no_allowlist(), &bl);
+        assert_eq!(first_pass, second_pass);
+        assert!(redactions.is_empty(), "second pass should find nothing");
     }
 }

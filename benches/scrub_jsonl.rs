@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use scrub_history::allowlist::Allowlist;
+use scrub_history::allowlist::{Allowlist, Blacklist};
 use scrub_history::entropy::EntropyConfig;
 use scrub_history::jsonl::scrub_jsonl_file;
 use scrub_history::patterns::PatternSet;
@@ -57,6 +57,7 @@ fn bench_scrub_jsonl(c: &mut Criterion) {
         ..Default::default()
     };
     let allowlist = Allowlist::empty();
+    let blacklist = Blacklist::empty();
 
     // ~500 lines ≈ a medium-length Claude conversation
     let corpus_500 = build_corpus(500);
@@ -75,7 +76,15 @@ fn bench_scrub_jsonl(c: &mut Criterion) {
                 f
             },
             |f| {
-                scrub_jsonl_file(f.path(), &pattern_set, &entropy_cfg, &allowlist, false).unwrap();
+                scrub_jsonl_file(
+                    f.path(),
+                    &pattern_set,
+                    &entropy_cfg,
+                    &allowlist,
+                    &blacklist,
+                    false,
+                )
+                .unwrap();
             },
             criterion::BatchSize::PerIteration,
         );
@@ -90,7 +99,15 @@ fn bench_scrub_jsonl(c: &mut Criterion) {
                 f
             },
             |f| {
-                scrub_jsonl_file(f.path(), &pattern_set, &entropy_cfg, &allowlist, false).unwrap();
+                scrub_jsonl_file(
+                    f.path(),
+                    &pattern_set,
+                    &entropy_cfg,
+                    &allowlist,
+                    &blacklist,
+                    false,
+                )
+                .unwrap();
             },
             criterion::BatchSize::PerIteration,
         );
@@ -108,6 +125,7 @@ fn bench_hook_latency_gate(c: &mut Criterion) {
         ..Default::default()
     };
     let allowlist = Allowlist::empty();
+    let blacklist = Blacklist::empty();
     let corpus = build_corpus(500);
 
     c.bench_function("hook_latency_gate_500_lines", |b| {
@@ -119,7 +137,15 @@ fn bench_hook_latency_gate(c: &mut Criterion) {
                 f
             },
             |f| {
-                scrub_jsonl_file(f.path(), &pattern_set, &entropy_cfg, &allowlist, false).unwrap();
+                scrub_jsonl_file(
+                    f.path(),
+                    &pattern_set,
+                    &entropy_cfg,
+                    &allowlist,
+                    &blacklist,
+                    false,
+                )
+                .unwrap();
             },
             criterion::BatchSize::PerIteration,
         );
