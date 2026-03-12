@@ -170,9 +170,11 @@ pub fn scrub_text(
 
 fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_lowercase();
-    SENSITIVE_KEYS
-        .iter()
-        .any(|&k| lower == k || lower.ends_with(&format!("_{k}")))
+    SENSITIVE_KEYS.iter().any(|&k| {
+        lower == k
+            || (lower.ends_with(k)
+                && lower.as_bytes().get(lower.len() - k.len() - 1) == Some(&b'_'))
+    })
 }
 
 /// Recursively scrub all string values in a JSON value tree.
