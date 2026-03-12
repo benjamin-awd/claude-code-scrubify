@@ -13,6 +13,8 @@ tempfile = "3"
 rayon = "1"
 anyhow = "1"
 tracing = "0.1"
+sha2 = "0.10"
+toml = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints.rust]

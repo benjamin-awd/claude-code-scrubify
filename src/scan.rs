@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
+use crate::allowlist::Allowlist;
 use crate::entropy::EntropyConfig;
 use crate::jsonl::{self, LineDiff};
 use crate::patterns::PatternSet;
@@ -46,12 +47,20 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         }
     };
 
+    let allowlist = match Allowlist::load() {
+        Ok(al) => al,
+        Err(e) => {
+            error!(error = %e, "failed to load allowlist");
+            return;
+        }
+    };
+
     let files_modified = AtomicU64::new(0);
     let redaction_counts: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
     let errors = AtomicU64::new(0);
 
     jsonl_files.par_iter().for_each(|path| {
-        match jsonl::scrub_jsonl_file(path, &pattern_set, entropy_cfg, dry_run) {
+        match jsonl::scrub_jsonl_file(path, &pattern_set, entropy_cfg, &allowlist, dry_run) {
             Ok(result) => {
                 if !result.redactions.is_empty() {
                     files_modified.fetch_add(1, Ordering::Relaxed);

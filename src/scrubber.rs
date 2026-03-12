@@ -1,3 +1,4 @@
+use crate::allowlist::Allowlist;
 use crate::entropy::{EntropyConfig, find_high_entropy_tokens};
 use crate::patterns::PatternSet;
 
@@ -23,6 +24,7 @@ pub(crate) fn scrub_text(
     text: &str,
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,
+    allowlist: &Allowlist,
 ) -> (String, Vec<Redaction>) {
     // Fast bail-out: if no regex matches at all and entropy is disabled, return early
     if !pattern_set.quick_check.is_match(text) && !entropy_cfg.enabled {
@@ -58,6 +60,9 @@ pub(crate) fn scrub_text(
             if end - start < MIN_SECRET_LEN {
                 continue;
             }
+            if allowlist.is_allowed(&text[start..end]) {
+                continue;
+            }
             spans.push(Redaction {
                 pattern_name: pat.name.clone(),
                 start,
@@ -71,7 +76,7 @@ pub(crate) fn scrub_text(
     for em in find_high_entropy_tokens(text, entropy_cfg) {
         // Don't flag tokens already covered by regex matches
         let already_covered = spans.iter().any(|s| s.start <= em.start && s.end >= em.end);
-        if !already_covered {
+        if !already_covered && !allowlist.is_allowed(&text[em.start..em.end]) {
             spans.push(Redaction {
                 pattern_name: "high-entropy".to_string(),
                 start: em.start,
@@ -144,10 +149,14 @@ mod tests {
         }
     }
 
+    fn no_allowlist() -> Allowlist {
+        Allowlist::empty()
+    }
+
     #[test]
     fn no_secrets() {
         let ps = test_pattern_set();
-        let (result, redactions) = scrub_text("hello world", &ps, &no_entropy());
+        let (result, redactions) = scrub_text("hello world", &ps, &no_entropy(), &no_allowlist());
         assert_eq!(result, "hello world");
         assert!(redactions.is_empty());
     }
@@ -156,7 +165,7 @@ mod tests {
     fn redacts_github_token() {
         let ps = test_pattern_set();
         let input = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
-        let (result, redactions) = scrub_text(input, &ps, &no_entropy());
+        let (result, redactions) = scrub_text(input, &ps, &no_entropy(), &no_allowlist());
         assert!(result.contains("[REDACTED:github-token]"));
         assert!(!result.contains("ghp_"));
         assert_eq!(redactions.len(), 1);
@@ -166,7 +175,7 @@ mod tests {
     fn redacts_multiple_secrets() {
         let ps = test_pattern_set();
         let input = "key1: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl and key2: sk-ant-abcdefghijklmnopqrstuvwxyz";
-        let (result, redactions) = scrub_text(input, &ps, &no_entropy());
+        let (result, redactions) = scrub_text(input, &ps, &no_entropy(), &no_allowlist());
         assert!(result.contains("[REDACTED:github-token]"));
         assert!(result.contains("[REDACTED:anthropic-key]"));
         assert_eq!(redactions.len(), 2);
@@ -176,8 +185,9 @@ mod tests {
     fn idempotent() {
         let ps = test_pattern_set();
         let input = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
-        let (first_pass, _) = scrub_text(input, &ps, &no_entropy());
-        let (second_pass, redactions) = scrub_text(&first_pass, &ps, &no_entropy());
+        let (first_pass, _) = scrub_text(input, &ps, &no_entropy(), &no_allowlist());
+        let (second_pass, redactions) =
+            scrub_text(&first_pass, &ps, &no_entropy(), &no_allowlist());
         assert_eq!(first_pass, second_pass);
         assert!(redactions.is_empty());
     }
@@ -187,7 +197,7 @@ mod tests {
         let ps = test_pattern_set();
         // "SK" + 32 hex chars = 34 chars, should be redacted
         let long_input = "key: SK_FAKE_TEST_KEY_REPLACED";
-        let (_, redactions) = scrub_text(long_input, &ps, &no_entropy());
+        let (_, redactions) = scrub_text(long_input, &ps, &no_entropy(), &no_allowlist());
         assert!(!redactions.is_empty(), "long twilio key should be redacted");
     }
 
@@ -195,7 +205,7 @@ mod tests {
     fn secret_group_redacts_only_value() {
         let ps = test_pattern_set();
         let input = r#"password = "my_super_secret_password""#;
-        let (result, redactions) = scrub_text(input, &ps, &no_entropy());
+        let (result, redactions) = scrub_text(input, &ps, &no_entropy(), &no_allowlist());
         // The key name should be preserved, only the value redacted
         assert!(
             result.contains("password"),
@@ -207,11 +217,23 @@ mod tests {
     }
 
     #[test]
+    fn allowlisted_value_not_redacted() {
+        let ps = test_pattern_set();
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
+        let hash = crate::allowlist::sha256_hex(token);
+        let al = Allowlist::from_hashes(vec![hash]);
+        let input = format!("token: {token}");
+        let (result, redactions) = scrub_text(&input, &ps, &no_entropy(), &al);
+        assert!(result.contains(token), "allowlisted value should remain");
+        assert!(redactions.is_empty());
+    }
+
+    #[test]
     fn entropy_detection() {
         let ps = test_pattern_set();
         let cfg = EntropyConfig::default();
         let input = "secret=aB3kL9mN2pQ5rT8vX1yZ4cF7gH0jK6wE";
-        let (result, redactions) = scrub_text(input, &ps, &cfg);
+        let (result, redactions) = scrub_text(input, &ps, &cfg, &no_allowlist());
         // Should detect via entropy or regex
         assert!(!redactions.is_empty() || result != input);
     }

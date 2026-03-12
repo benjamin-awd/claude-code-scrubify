@@ -6,6 +6,7 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 use tracing::warn;
 
+use crate::allowlist::Allowlist;
 use crate::entropy::EntropyConfig;
 use crate::patterns::PatternSet;
 use crate::scrubber::{Redaction, scrub_text};
@@ -26,6 +27,7 @@ pub(crate) fn scrub_jsonl_file(
     path: &Path,
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,
+    allowlist: &Allowlist,
     dry_run: bool,
 ) -> Result<ScrubResult> {
     let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -54,7 +56,7 @@ pub(crate) fn scrub_jsonl_file(
         }
 
         if let Ok(mut value) = serde_json::from_str::<Value>(&line) {
-            let redactions = scrub_value(&mut value, pattern_set, entropy_cfg);
+            let redactions = scrub_value(&mut value, pattern_set, entropy_cfg, allowlist);
             if redactions.is_empty() {
                 writeln!(writer, "{line}")?;
             } else {
@@ -95,23 +97,25 @@ fn scrub_value(
     value: &mut Value,
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,
+    al: &Allowlist,
 ) -> Vec<Redaction> {
     let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     match msg_type {
         "system" | "file-history-snapshot" => Vec::new(),
-        "user" => scrub_at_path(value, &["message", "content"], pattern_set, entropy_cfg),
-        "assistant" => scrub_assistant_message(value, pattern_set, entropy_cfg),
+        "user" => scrub_at_path(value, &["message", "content"], pattern_set, entropy_cfg, al),
+        "assistant" => scrub_assistant_message(value, pattern_set, entropy_cfg, al),
         "progress" => scrub_at_path(
             value,
             &["data", "message", "message", "content"],
             pattern_set,
             entropy_cfg,
+            al,
         ),
-        "queue-operation" => scrub_at_path(value, &["content"], pattern_set, entropy_cfg),
+        "queue-operation" => scrub_at_path(value, &["content"], pattern_set, entropy_cfg, al),
         _ => {
             // Unknown type — recursively scrub all strings as a safety net
-            scrub_all_strings(value, pattern_set, entropy_cfg)
+            scrub_all_strings(value, pattern_set, entropy_cfg, al)
         }
     }
 }
@@ -120,6 +124,7 @@ fn scrub_assistant_message(
     value: &mut Value,
     ps: &PatternSet,
     ec: &EntropyConfig,
+    al: &Allowlist,
 ) -> Vec<Redaction> {
     let mut redactions = Vec::new();
 
@@ -132,7 +137,7 @@ fn scrub_assistant_message(
         for item in content_array.iter_mut() {
             // .text field
             if let Some(Value::String(text)) = item.get_mut("text") {
-                let (scrubbed, r) = scrub_text(text, ps, ec);
+                let (scrubbed, r) = scrub_text(text, ps, ec, al);
                 if !r.is_empty() {
                     *text = scrubbed;
                     redactions.extend(r);
@@ -141,7 +146,7 @@ fn scrub_assistant_message(
 
             // .thinking field
             if let Some(Value::String(thinking)) = item.get_mut("thinking") {
-                let (scrubbed, r) = scrub_text(thinking, ps, ec);
+                let (scrubbed, r) = scrub_text(thinking, ps, ec, al);
                 if !r.is_empty() {
                     *thinking = scrubbed;
                     redactions.extend(r);
@@ -150,12 +155,12 @@ fn scrub_assistant_message(
 
             // .input (tool_use) — recursively scrub all strings
             if let Some(input) = item.get_mut("input") {
-                redactions.extend(scrub_all_strings(input, ps, ec));
+                redactions.extend(scrub_all_strings(input, ps, ec, al));
             }
 
             // .content (tool_result) — recursively scrub all strings
             if let Some(content) = item.get_mut("content") {
-                redactions.extend(scrub_all_strings(content, ps, ec));
+                redactions.extend(scrub_all_strings(content, ps, ec, al));
             }
         }
     }
@@ -168,6 +173,7 @@ fn scrub_at_path(
     path: &[&str],
     ps: &PatternSet,
     ec: &EntropyConfig,
+    al: &Allowlist,
 ) -> Vec<Redaction> {
     let mut current = value as &mut Value;
     for &key in &path[..path.len().saturating_sub(1)] {
@@ -180,7 +186,7 @@ fn scrub_at_path(
     if let Some(&last_key) = path.last()
         && let Some(target) = current.get_mut(last_key)
     {
-        return scrub_all_strings(target, ps, ec);
+        return scrub_all_strings(target, ps, ec, al);
     }
 
     Vec::new()
@@ -214,14 +220,20 @@ fn is_sensitive_key(key: &str) -> bool {
         .any(|&k| lower == k || lower.ends_with(&format!("_{k}")))
 }
 
-fn scrub_all_strings(value: &mut Value, ps: &PatternSet, ec: &EntropyConfig) -> Vec<Redaction> {
-    scrub_all_strings_inner(value, ps, ec, false)
+fn scrub_all_strings(
+    value: &mut Value,
+    ps: &PatternSet,
+    ec: &EntropyConfig,
+    al: &Allowlist,
+) -> Vec<Redaction> {
+    scrub_all_strings_inner(value, ps, ec, al, false)
 }
 
 fn scrub_all_strings_inner(
     value: &mut Value,
     ps: &PatternSet,
     ec: &EntropyConfig,
+    al: &Allowlist,
     force_redact: bool,
 ) -> Vec<Redaction> {
     match value {
@@ -229,6 +241,9 @@ fn scrub_all_strings_inner(
             // Key-value awareness: if the parent key was sensitive and the
             // value is long enough, redact the whole thing unconditionally.
             if force_redact && s.len() >= SENSITIVE_KEY_MIN_VALUE_LEN {
+                if al.is_allowed(s) {
+                    return Vec::new();
+                }
                 let redaction = Redaction {
                     pattern_name: "sensitive-field".to_string(),
                     start: 0,
@@ -238,7 +253,7 @@ fn scrub_all_strings_inner(
                 *s = "[REDACTED:sensitive-field]".to_string();
                 return vec![redaction];
             }
-            let (scrubbed, redactions) = scrub_text(s, ps, ec);
+            let (scrubbed, redactions) = scrub_text(s, ps, ec, al);
             if !redactions.is_empty() {
                 *s = scrubbed;
             }
@@ -246,13 +261,13 @@ fn scrub_all_strings_inner(
         }
         Value::Array(arr) => arr
             .iter_mut()
-            .flat_map(|v| scrub_all_strings_inner(v, ps, ec, force_redact))
+            .flat_map(|v| scrub_all_strings_inner(v, ps, ec, al, force_redact))
             .collect(),
         Value::Object(map) => {
             let mut redactions = Vec::new();
             for (key, val) in map.iter_mut() {
                 let sensitive = is_sensitive_key(key);
-                redactions.extend(scrub_all_strings_inner(val, ps, ec, sensitive));
+                redactions.extend(scrub_all_strings_inner(val, ps, ec, al, sensitive));
             }
             redactions
         }
@@ -263,11 +278,16 @@ fn scrub_all_strings_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn make_test_file(content: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         write!(f, "{content}").unwrap();
         f.flush().unwrap();
         f
+    }
+
+    fn no_allowlist() -> Allowlist {
+        Allowlist::empty()
     }
 
     #[test]
@@ -280,7 +300,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &no_allowlist(), false).unwrap();
         assert_eq!(result.lines_modified, 1);
         assert!(!result.redactions.is_empty());
 
@@ -300,7 +320,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, true).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &no_allowlist(), true).unwrap();
         assert!(!result.redactions.is_empty());
 
         let content = fs::read_to_string(file.path()).unwrap();
@@ -332,7 +352,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, true).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &no_allowlist(), true).unwrap();
         assert_eq!(result.diffs.len(), 2);
         assert_eq!(result.diffs[0].line_number, 2);
         assert_eq!(result.diffs[1].line_number, 4);
@@ -348,7 +368,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &no_allowlist(), false).unwrap();
         assert!(!result.redactions.is_empty());
         assert!(
             result.diffs.is_empty(),
@@ -366,7 +386,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false);
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &no_allowlist(), false);
         assert!(result.is_ok());
     }
 
@@ -380,7 +400,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &no_allowlist(), false).unwrap();
         assert!(result.redactions.is_empty());
     }
 
@@ -394,7 +414,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &no_allowlist(), false).unwrap();
         assert!(!result.redactions.is_empty());
 
         let content = fs::read_to_string(file.path()).unwrap();
@@ -413,7 +433,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &no_allowlist(), false).unwrap();
         assert!(!result.redactions.is_empty());
 
         let content = fs::read_to_string(file.path()).unwrap();
@@ -431,7 +451,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &no_allowlist(), false).unwrap();
         assert!(
             result.redactions.is_empty(),
             "short values under sensitive keys should not be redacted"

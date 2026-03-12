@@ -1,3 +1,4 @@
+mod allowlist;
 mod entropy;
 mod hook;
 mod jsonl;

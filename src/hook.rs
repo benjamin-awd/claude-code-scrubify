@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
+use crate::allowlist::Allowlist;
 use crate::entropy::EntropyConfig;
 use crate::jsonl;
 use crate::patterns::PatternSet;
@@ -64,8 +65,9 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
     }
 
     let pattern_set = PatternSet::load(false)?;
+    let allowlist = Allowlist::load()?;
 
-    let result = jsonl::scrub_jsonl_file(&canonical, &pattern_set, entropy_cfg, false)?;
+    let result = jsonl::scrub_jsonl_file(&canonical, &pattern_set, entropy_cfg, &allowlist, false)?;
 
     if !result.redactions.is_empty() {
         info!(
