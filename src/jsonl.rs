@@ -8,7 +8,7 @@ use tracing::warn;
 
 use crate::entropy::EntropyConfig;
 use crate::patterns::PatternSet;
-use crate::scanner::{scrub_text, Redaction};
+use crate::scrubber::{scrub_text, Redaction};
 
 pub struct LineDiff {
     pub line_number: usize, // 1-based

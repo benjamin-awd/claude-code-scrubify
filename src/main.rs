@@ -3,7 +3,7 @@ mod hook;
 mod jsonl;
 mod patterns;
 mod scan;
-mod scanner;
+mod scrubber;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
