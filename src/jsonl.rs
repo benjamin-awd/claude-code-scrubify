@@ -69,13 +69,25 @@ pub fn scrub_jsonl_file(
                 writeln!(writer, "{line}")?;
             } else {
                 lines_modified += 1;
+                // Deduplicate: the same secret value may appear in multiple
+                // JSON fields within a single JSONL line (e.g. a command and
+                // its echoed output).  Count and report it only once per line.
+                let mut deduped = redactions;
+                deduped.sort_by(|a, b| {
+                    a.pattern_name
+                        .cmp(&b.pattern_name)
+                        .then_with(|| a.matched_text.cmp(&b.matched_text))
+                });
+                deduped.dedup_by(|a, b| {
+                    a.pattern_name == b.pattern_name && a.matched_text == b.matched_text
+                });
                 if dry_run {
                     diffs.push(LineDiff {
                         line_number,
-                        redactions: redactions.clone(),
+                        redactions: deduped.clone(),
                     });
                 }
-                all_redactions.extend(redactions);
+                all_redactions.extend(deduped);
                 let scrubbed = serde_json::to_string(&value)?;
                 writeln!(writer, "{scrubbed}")?;
             }
@@ -250,6 +262,34 @@ mod tests {
         let content = fs::read_to_string(file.path()).unwrap();
         assert!(content.contains("[REDACTED:sensitive-field]"));
         assert!(!content.contains("not_a_known_pattern_value"));
+    }
+
+    #[test]
+    fn deduplicates_same_secret_across_fields() {
+        // Same token appears in both .text and .input within the same JSONL line.
+        // The redaction should be applied to both, but counted/reported only once.
+        let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"token {token}"}},{{"type":"tool_use","input":{{"command":"echo {token}"}}}}]}}}}"#,
+        );
+        let file = make_test_file(&format!("{line}\n"));
+        let (ps, ec, al) = test_fixtures();
+
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, true).unwrap();
+        // Both occurrences are redacted in the file
+        assert_eq!(result.lines_modified, 1);
+        // But deduplicated: same pattern + same matched_text = 1 redaction
+        assert_eq!(
+            result.redactions.len(),
+            1,
+            "same secret in multiple fields should be deduplicated"
+        );
+        assert_eq!(result.diffs.len(), 1);
+        assert_eq!(
+            result.diffs[0].redactions.len(),
+            1,
+            "diff should also be deduplicated"
+        );
     }
 
     #[test]
