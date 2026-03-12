@@ -140,36 +140,21 @@ fn run_status_inner() -> Result<()> {
 
     let projects_dir = claude_dir.join("projects");
     if projects_dir.exists() {
-        let jsonl_files: Vec<PathBuf> = WalkDir::new(&projects_dir)
+        let mut total_files: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        for entry in WalkDir::new(&projects_dir)
             .into_iter()
             .filter_map(std::result::Result::ok)
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-            .map(walkdir::DirEntry::into_path)
-            .collect();
-
-        let total_files = jsonl_files.len();
-        let total_bytes: u64 = jsonl_files
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
+        {
+            total_files += 1;
+            if let Ok(meta) = entry.metadata() {
+                total_bytes += meta.len();
+            }
+        }
 
         println!("  History files: {total_files}");
         println!("  Total size:    {}", display::format_bytes(total_bytes));
-
-        let scrubbed_count = jsonl_files
-            .iter()
-            .filter(|p| file_contains_redaction(p))
-            .count();
-
-        if scrubbed_count > 0 {
-            println!(
-                "  Files with redactions: {scrubbed_count}/{total_files} ({:.0}%)",
-                (scrubbed_count as f64 / total_files as f64) * 100.0
-            );
-        } else {
-            println!("  Files with redactions: 0/{total_files}");
-        }
     } else {
         println!("  {DIM}No projects directory found (~/.claude/projects/){RESET}");
     }
@@ -184,9 +169,11 @@ fn run_status_inner() -> Result<()> {
             display::format_epoch(hook.timestamp_epoch),
             display::format_relative(hook.timestamp_epoch),
         );
+        let short_file = std::path::Path::new(&hook.file)
+            .file_name()
+            .map_or(hook.file.as_str(), |f| f.to_str().unwrap_or(&hook.file));
         println!(
-            "  Last file:  {} ({})",
-            hook.file,
+            "  Last file:  {DIM}[...]/{short_file}{RESET} ({})",
             display::format_bytes(hook.file_size_bytes),
         );
         println!(
@@ -256,19 +243,4 @@ fn run_status_inner() -> Result<()> {
 
     println!();
     Ok(())
-}
-
-/// Quick check whether a file contains any [REDACTED:...] markers.
-/// Reads only the first 256KB to keep the coverage check fast.
-fn file_contains_redaction(path: &PathBuf) -> bool {
-    use std::io::Read;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut buf = vec![0u8; 256 * 1024];
-    let Ok(n) = file.read(&mut buf) else {
-        return false;
-    };
-    let chunk = &buf[..n];
-    chunk.windows(10).any(|w| w == b"[REDACTED:")
 }
