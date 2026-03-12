@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
-use scrub_history::allowlist::Allowlist;
+use scrub_history::allowlist;
 use scrub_history::entropy::EntropyConfig;
 use scrub_history::jsonl;
 use scrub_history::patterns::PatternSet;
@@ -67,10 +67,18 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
     }
 
     let pattern_set = PatternSet::load(false)?;
-    let allowlist = Allowlist::load()?;
+    let settings = allowlist::load_config()?;
+    let allowlist = settings.allowlist;
+
+    // Merge file-based exclude patterns into the CLI-supplied entropy config
+    let mut entropy_cfg = entropy_cfg.clone();
+    entropy_cfg
+        .exclude_patterns
+        .extend(settings.entropy_exclude_patterns);
 
     let start = Instant::now();
-    let result = jsonl::scrub_jsonl_file(&canonical, &pattern_set, entropy_cfg, &allowlist, false)?;
+    let result =
+        jsonl::scrub_jsonl_file(&canonical, &pattern_set, &entropy_cfg, &allowlist, false)?;
     #[allow(clippy::cast_possible_truncation)] // duration in ms won't exceed u64
     let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -83,9 +91,10 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
             "scrub-history: redacted secret(s)"
         );
         for r in &result.redactions {
+            let preview = super::scan::truncate_secret(&r.matched_text, 40);
             debug!(
                 pattern = %r.pattern_name,
-                matched = %r.matched_text,
+                matched = preview,
                 "redacted"
             );
         }

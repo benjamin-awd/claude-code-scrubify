@@ -8,7 +8,7 @@ use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
-use scrub_history::allowlist::Allowlist;
+use scrub_history::allowlist;
 use scrub_history::entropy::EntropyConfig;
 use scrub_history::jsonl::{self, LineDiff};
 use scrub_history::patterns::PatternSet;
@@ -49,13 +49,19 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         }
     };
 
-    let allowlist = match Allowlist::load() {
-        Ok(al) => al,
+    let settings = match allowlist::load_config() {
+        Ok(s) => s,
         Err(e) => {
-            error!(error = %e, "failed to load allowlist");
+            error!(error = %e, "failed to load config");
             return;
         }
     };
+    let allowlist = settings.allowlist;
+    let mut entropy_cfg = entropy_cfg.clone();
+    entropy_cfg
+        .exclude_patterns
+        .extend(settings.entropy_exclude_patterns);
+    let entropy_cfg = &entropy_cfg;
 
     let files_modified = AtomicU64::new(0);
     let redaction_counts: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
@@ -159,7 +165,7 @@ fn print_unified_diff(path: &Path, diffs: &[LineDiff], no_truncate: bool) {
 
 /// Show the first `max_len` chars, masking the middle portion to avoid
 /// printing full secrets to the terminal while still being identifiable.
-fn truncate_secret(s: &str, max_len: usize) -> String {
+pub(crate) fn truncate_secret(s: &str, max_len: usize) -> String {
     let s = s.replace('\n', "\\n").replace('\r', "\\r");
     if s.len() <= max_len {
         let visible = s.len().min(8);
