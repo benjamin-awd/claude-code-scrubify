@@ -2,6 +2,7 @@ mod allowlist;
 mod entropy;
 mod hook;
 mod jsonl;
+mod message;
 mod patterns;
 mod scan;
 mod scrubber;

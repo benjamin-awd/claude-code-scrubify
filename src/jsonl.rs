@@ -8,8 +8,9 @@ use tracing::warn;
 
 use crate::allowlist::Allowlist;
 use crate::entropy::EntropyConfig;
+use crate::message;
 use crate::patterns::PatternSet;
-use crate::scrubber::{Redaction, scrub_text};
+use crate::scrubber::Redaction;
 
 pub(crate) struct LineDiff {
     pub line_number: usize, // 1-based
@@ -56,7 +57,7 @@ pub(crate) fn scrub_jsonl_file(
         }
 
         if let Ok(mut value) = serde_json::from_str::<Value>(&line) {
-            let redactions = scrub_value(&mut value, pattern_set, entropy_cfg, allowlist);
+            let redactions = message::scrub_value(&mut value, pattern_set, entropy_cfg, allowlist);
             if redactions.is_empty() {
                 writeln!(writer, "{line}")?;
             } else {
@@ -91,188 +92,6 @@ pub(crate) fn scrub_jsonl_file(
         lines_modified,
         diffs,
     })
-}
-
-fn scrub_value(
-    value: &mut Value,
-    pattern_set: &PatternSet,
-    entropy_cfg: &EntropyConfig,
-    al: &Allowlist,
-) -> Vec<Redaction> {
-    let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-    match msg_type {
-        "system" | "file-history-snapshot" => Vec::new(),
-        "user" => scrub_at_path(value, &["message", "content"], pattern_set, entropy_cfg, al),
-        "assistant" => scrub_assistant_message(value, pattern_set, entropy_cfg, al),
-        "progress" => scrub_at_path(
-            value,
-            &["data", "message", "message", "content"],
-            pattern_set,
-            entropy_cfg,
-            al,
-        ),
-        "queue-operation" => scrub_at_path(value, &["content"], pattern_set, entropy_cfg, al),
-        _ => {
-            // Unknown type — recursively scrub all strings as a safety net
-            scrub_all_strings(value, pattern_set, entropy_cfg, al)
-        }
-    }
-}
-
-fn scrub_assistant_message(
-    value: &mut Value,
-    ps: &PatternSet,
-    ec: &EntropyConfig,
-    al: &Allowlist,
-) -> Vec<Redaction> {
-    let mut redactions = Vec::new();
-
-    // Navigate to .message.content which is an array
-    if let Some(content_array) = value
-        .get_mut("message")
-        .and_then(|m| m.get_mut("content"))
-        .and_then(|c| c.as_array_mut())
-    {
-        for item in content_array.iter_mut() {
-            // .text field
-            if let Some(Value::String(text)) = item.get_mut("text") {
-                let (scrubbed, r) = scrub_text(text, ps, ec, al);
-                if !r.is_empty() {
-                    *text = scrubbed;
-                    redactions.extend(r);
-                }
-            }
-
-            // .thinking field
-            if let Some(Value::String(thinking)) = item.get_mut("thinking") {
-                let (scrubbed, r) = scrub_text(thinking, ps, ec, al);
-                if !r.is_empty() {
-                    *thinking = scrubbed;
-                    redactions.extend(r);
-                }
-            }
-
-            // .input (tool_use) — recursively scrub all strings
-            if let Some(input) = item.get_mut("input") {
-                redactions.extend(scrub_all_strings(input, ps, ec, al));
-            }
-
-            // .content (tool_result) — recursively scrub all strings
-            if let Some(content) = item.get_mut("content") {
-                redactions.extend(scrub_all_strings(content, ps, ec, al));
-            }
-        }
-    }
-
-    redactions
-}
-
-fn scrub_at_path(
-    value: &mut Value,
-    path: &[&str],
-    ps: &PatternSet,
-    ec: &EntropyConfig,
-    al: &Allowlist,
-) -> Vec<Redaction> {
-    let mut current = value as &mut Value;
-    for &key in &path[..path.len().saturating_sub(1)] {
-        match current.get_mut(key) {
-            Some(v) => current = v,
-            None => return Vec::new(),
-        }
-    }
-
-    if let Some(&last_key) = path.last()
-        && let Some(target) = current.get_mut(last_key)
-    {
-        return scrub_all_strings(target, ps, ec, al);
-    }
-
-    Vec::new()
-}
-
-/// Minimum length for a value to be redacted by key-name alone.
-const SENSITIVE_KEY_MIN_VALUE_LEN: usize = 8;
-
-/// Field names whose string values should always be redacted (case-insensitive).
-const SENSITIVE_KEYS: &[&str] = &[
-    "password",
-    "passwd",
-    "pwd",
-    "secret",
-    "api_key",
-    "apikey",
-    "api_secret",
-    "access_token",
-    "auth_token",
-    "token",
-    "private_key",
-    "secret_key",
-    "credentials",
-    "authorization",
-];
-
-fn is_sensitive_key(key: &str) -> bool {
-    let lower = key.to_lowercase();
-    SENSITIVE_KEYS
-        .iter()
-        .any(|&k| lower == k || lower.ends_with(&format!("_{k}")))
-}
-
-fn scrub_all_strings(
-    value: &mut Value,
-    ps: &PatternSet,
-    ec: &EntropyConfig,
-    al: &Allowlist,
-) -> Vec<Redaction> {
-    scrub_all_strings_inner(value, ps, ec, al, false)
-}
-
-fn scrub_all_strings_inner(
-    value: &mut Value,
-    ps: &PatternSet,
-    ec: &EntropyConfig,
-    al: &Allowlist,
-    force_redact: bool,
-) -> Vec<Redaction> {
-    match value {
-        Value::String(s) => {
-            // Key-value awareness: if the parent key was sensitive and the
-            // value is long enough, redact the whole thing unconditionally.
-            if force_redact && s.len() >= SENSITIVE_KEY_MIN_VALUE_LEN {
-                if al.is_allowed(s) {
-                    return Vec::new();
-                }
-                let redaction = Redaction {
-                    pattern_name: "sensitive-field".to_string(),
-                    start: 0,
-                    end: s.len(),
-                    matched_text: s.clone(),
-                };
-                *s = "[REDACTED:sensitive-field]".to_string();
-                return vec![redaction];
-            }
-            let (scrubbed, redactions) = scrub_text(s, ps, ec, al);
-            if !redactions.is_empty() {
-                *s = scrubbed;
-            }
-            redactions
-        }
-        Value::Array(arr) => arr
-            .iter_mut()
-            .flat_map(|v| scrub_all_strings_inner(v, ps, ec, al, force_redact))
-            .collect(),
-        Value::Object(map) => {
-            let mut redactions = Vec::new();
-            for (key, val) in map.iter_mut() {
-                let sensitive = is_sensitive_key(key);
-                redactions.extend(scrub_all_strings_inner(val, ps, ec, al, sensitive));
-            }
-            redactions
-        }
-        _ => Vec::new(),
-    }
 }
 
 #[cfg(test)]
