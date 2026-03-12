@@ -63,7 +63,7 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let pattern_set = PatternSet::load(false);
+    let pattern_set = PatternSet::load(false)?;
 
     let result = jsonl::scrub_jsonl_file(&canonical, &pattern_set, entropy_cfg, false)?;
 

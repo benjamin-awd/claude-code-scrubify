@@ -204,7 +204,7 @@ mod tests {
     fn scrubs_user_message() {
         let line = r#"{"type":"user","message":{"content":"my token is ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
         let file = make_test_file(&format!("{line}\n"));
-        let ps = PatternSet::load(true);
+        let ps = PatternSet::load(true).unwrap();
         let ec = EntropyConfig { enabled: false, ..Default::default() };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
@@ -221,7 +221,7 @@ mod tests {
         let line = r#"{"type":"user","message":{"content":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
         let original = format!("{line}\n");
         let file = make_test_file(&original);
-        let ps = PatternSet::load(true);
+        let ps = PatternSet::load(true).unwrap();
         let ec = EntropyConfig { enabled: false, ..Default::default() };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, true).unwrap();
@@ -246,7 +246,7 @@ mod tests {
             r#"{"type":"user","message":{"content":"key AKIAVCODYLSA53PQK4ZA"}}"#, "\n",
         );
         let file = make_test_file(lines);
-        let ps = PatternSet::load(true);
+        let ps = PatternSet::load(true).unwrap();
         let ec = EntropyConfig { enabled: false, ..Default::default() };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, true).unwrap();
@@ -259,7 +259,7 @@ mod tests {
     fn non_dry_run_does_not_collect_diffs() {
         let line = r#"{"type":"user","message":{"content":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
         let file = make_test_file(&format!("{line}\n"));
-        let ps = PatternSet::load(true);
+        let ps = PatternSet::load(true).unwrap();
         let ec = EntropyConfig { enabled: false, ..Default::default() };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
@@ -271,7 +271,7 @@ mod tests {
     fn handles_malformed_json() {
         let content = "not json at all\n{\"type\":\"system\"}\n";
         let file = make_test_file(content);
-        let ps = PatternSet::load(true);
+        let ps = PatternSet::load(true).unwrap();
         let ec = EntropyConfig { enabled: false, ..Default::default() };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, false);
@@ -282,7 +282,7 @@ mod tests {
     fn skips_system_type() {
         let line = r#"{"type":"system","content":"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}"#;
         let file = make_test_file(&format!("{line}\n"));
-        let ps = PatternSet::load(true);
+        let ps = PatternSet::load(true).unwrap();
         let ec = EntropyConfig { enabled: false, ..Default::default() };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();
@@ -293,7 +293,7 @@ mod tests {
     fn scrubs_assistant_tool_use() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"command":"echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}]}}"#;
         let file = make_test_file(&format!("{line}\n"));
-        let ps = PatternSet::load(true);
+        let ps = PatternSet::load(true).unwrap();
         let ec = EntropyConfig { enabled: false, ..Default::default() };
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, false).unwrap();

@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -19,23 +20,23 @@ struct CustomPattern {
 }
 
 impl PatternSet {
-    pub fn load(skip_custom: bool) -> Self {
-        let mut patterns = built_in_patterns();
+    pub fn load(skip_custom: bool) -> Result<Self> {
+        let mut patterns = built_in_patterns()?;
 
         if !skip_custom {
-            if let Some(custom) = load_custom_patterns() {
+            if let Some(custom) = load_custom_patterns()? {
                 patterns.extend(custom);
             }
         }
 
         let raw: Vec<&str> = patterns.iter().map(|p| p.regex.as_str()).collect();
-        let quick_check = RegexSet::new(&raw).expect("built-in patterns must compile");
+        let quick_check = RegexSet::new(&raw).context("compiling pattern set")?;
 
-        PatternSet { patterns, quick_check }
+        Ok(PatternSet { patterns, quick_check })
     }
 }
 
-fn built_in_patterns() -> Vec<SecretPattern> {
+fn built_in_patterns() -> Result<Vec<SecretPattern>> {
     let defs = vec![
         // AWS
         ("aws-access-key", r"(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}"),
@@ -94,29 +95,37 @@ fn built_in_patterns() -> Vec<SecretPattern> {
     ];
 
     defs.into_iter()
-        .map(|(name, pattern)| SecretPattern {
-            name: name.to_string(),
-            regex: Regex::new(pattern).unwrap_or_else(|e| panic!("bad pattern {name}: {e}")),
+        .map(|(name, pattern)| {
+            let regex = Regex::new(pattern)
+                .with_context(|| format!("invalid regex for pattern '{name}'"))?;
+            Ok(SecretPattern { name: name.to_string(), regex })
         })
         .collect()
 }
 
-fn load_custom_patterns() -> Option<Vec<SecretPattern>> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+fn load_custom_patterns() -> Result<Option<Vec<SecretPattern>>> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(None);
+    };
     let path = home.join(".claude").join("scrubber-patterns.json");
-    let data = std::fs::read_to_string(&path).ok()?;
-    let custom: Vec<CustomPattern> = serde_json::from_str(&data).ok()?;
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context(format!("reading {}", path.display())),
+    };
+    let custom: Vec<CustomPattern> = serde_json::from_str(&data)
+        .context(format!("parsing {}", path.display()))?;
 
     let patterns: Vec<SecretPattern> = custom
         .into_iter()
-        .filter_map(|c| {
-            Regex::new(&c.regex)
-                .ok()
-                .map(|r| SecretPattern { name: c.name, regex: r })
+        .map(|c| {
+            let regex = Regex::new(&c.regex)
+                .with_context(|| format!("invalid regex for custom pattern '{}'", c.name))?;
+            Ok(SecretPattern { name: c.name, regex })
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
-    Some(patterns)
+    Ok(Some(patterns))
 }
 
 
@@ -125,7 +134,7 @@ mod tests {
     use super::*;
 
     fn check(pattern_name: &str, positives: &[&str], negatives: &[&str]) {
-        let patterns = built_in_patterns();
+        let patterns = built_in_patterns().unwrap();
         let pat = patterns.iter().find(|p| p.name == pattern_name)
             .unwrap_or_else(|| panic!("pattern not found: {pattern_name}"));
 
@@ -302,7 +311,7 @@ mod tests {
 
     #[test]
     fn pattern_set_loads() {
-        let ps = PatternSet::load(true);
+        let ps = PatternSet::load(true).unwrap();
         assert!(ps.patterns.len() >= 20);
         assert_eq!(ps.patterns.len(), ps.quick_check.len());
     }

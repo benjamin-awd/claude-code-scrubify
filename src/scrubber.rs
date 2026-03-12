@@ -109,7 +109,7 @@ mod tests {
     use super::*;
 
     fn test_pattern_set() -> PatternSet {
-        PatternSet::load(true)
+        PatternSet::load(true).unwrap()
     }
 
     fn no_entropy() -> EntropyConfig {

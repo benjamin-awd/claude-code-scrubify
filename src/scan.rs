@@ -44,7 +44,13 @@ pub fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
         "scanning JSONL files"
     );
 
-    let pattern_set = PatternSet::load(false);
+    let pattern_set = match PatternSet::load(false) {
+        Ok(ps) => ps,
+        Err(e) => {
+            error!(error = %e, "failed to load patterns");
+            std::process::exit(1);
+        }
+    };
 
     let files_modified = AtomicU64::new(0);
     let redaction_counts: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
