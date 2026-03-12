@@ -102,7 +102,8 @@ fn built_in_patterns() -> Vec<SecretPattern> {
 }
 
 fn load_custom_patterns() -> Option<Vec<SecretPattern>> {
-    let path = home_dir()?.join(".claude").join("scrubber-patterns.json");
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let path = home.join(".claude").join("scrubber-patterns.json");
     let data = std::fs::read_to_string(&path).ok()?;
     let custom: Vec<CustomPattern> = serde_json::from_str(&data).ok()?;
 
@@ -118,9 +119,6 @@ fn load_custom_patterns() -> Option<Vec<SecretPattern>> {
     Some(patterns)
 }
 
-pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
 
 #[cfg(test)]
 mod tests {

@@ -9,10 +9,10 @@ use walkdir::WalkDir;
 
 use crate::entropy::EntropyConfig;
 use crate::jsonl::{self, LineDiff};
-use crate::patterns::{self, PatternSet};
+use crate::patterns::PatternSet;
 
 pub fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
-    let projects_dir = match patterns::home_dir() {
+    let projects_dir = match std::env::var_os("HOME").map(PathBuf::from) {
         Some(home) => home.join(".claude").join("projects"),
         None => {
             error!("HOME not set");

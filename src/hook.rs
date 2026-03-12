@@ -1,11 +1,11 @@
 use serde::Deserialize;
 use std::io::Read;
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::entropy::EntropyConfig;
 use crate::jsonl;
-use crate::patterns::{self, PatternSet};
+use crate::patterns::PatternSet;
 
 #[derive(Deserialize)]
 struct HookInput {
@@ -37,9 +37,10 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no transcript_path in hook input"))?;
 
     // Expand ~ to home directory
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
     let path = if transcript_path.starts_with('~') {
-        let home = patterns::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
         PathBuf::from(transcript_path.replacen('~', &home.to_string_lossy(), 1))
     } else {
         PathBuf::from(&transcript_path)
@@ -49,14 +50,27 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Canonicalize to resolve symlinks and ../ components, then validate
+    // the path is under ~/.claude/ to prevent arbitrary file writes.
+    let canonical = path.canonicalize()?;
+    let allowed_prefix = home.join(".claude");
+    if !canonical.starts_with(&allowed_prefix) {
+        warn!(
+            path = %canonical.display(),
+            allowed = %allowed_prefix.display(),
+            "transcript path is outside ~/.claude/, refusing to process"
+        );
+        return Ok(());
+    }
+
     let pattern_set = PatternSet::load(false);
 
-    let result = jsonl::scrub_jsonl_file(&path, &pattern_set, entropy_cfg, false)?;
+    let result = jsonl::scrub_jsonl_file(&canonical, &pattern_set, entropy_cfg, false)?;
 
     if !result.redactions.is_empty() {
         info!(
             count = result.redactions.len(),
-            file = %path.display(),
+            file = %canonical.display(),
             "scrub-history: redacted secret(s)"
         );
     }
