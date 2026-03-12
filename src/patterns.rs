@@ -18,6 +18,8 @@ pub struct SecretPattern {
 pub struct PatternSet {
     pub patterns: Vec<SecretPattern>,
     pub quick_check: RegexSet,
+    /// All unique keywords across every pattern, for cheap line-level pre-filtering.
+    pub all_keywords: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -46,6 +48,14 @@ impl SecretPattern {
 }
 
 impl PatternSet {
+    /// Cheap check: does the text contain any keyword from any pattern?
+    /// Operates on already-lowercased text.
+    pub fn any_keyword_hit(&self, text_lower: &str) -> bool {
+        self.all_keywords
+            .iter()
+            .any(|kw| text_lower.contains(kw.as_str()))
+    }
+
     pub fn load(skip_custom: bool) -> Result<Self> {
         let mut patterns = built_in_patterns()?;
 
@@ -56,9 +66,17 @@ impl PatternSet {
         let raw: Vec<&str> = patterns.iter().map(|p| p.regex.as_str()).collect();
         let quick_check = RegexSet::new(&raw).context("compiling pattern set")?;
 
+        let mut seen = std::collections::HashSet::new();
+        let all_keywords: Vec<String> = patterns
+            .iter()
+            .flat_map(|p| p.keywords.iter().cloned())
+            .filter(|kw| seen.insert(kw.clone()))
+            .collect();
+
         Ok(PatternSet {
             patterns,
             quick_check,
+            all_keywords,
         })
     }
 }

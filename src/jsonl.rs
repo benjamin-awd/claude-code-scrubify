@@ -56,6 +56,13 @@ pub fn scrub_jsonl_file(
             continue;
         }
 
+        // Cheap pre-filter: skip lines for message types we know don't need
+        // scrubbing, without paying for a full JSON parse.
+        if is_skippable_message_type(&line) {
+            writeln!(writer, "{line}")?;
+            continue;
+        }
+
         if let Ok(mut value) = serde_json::from_str::<Value>(&line) {
             let redactions = message::scrub_value(&mut value, pattern_set, entropy_cfg, allowlist);
             if redactions.is_empty() {
@@ -92,6 +99,16 @@ pub fn scrub_jsonl_file(
         lines_modified,
         diffs,
     })
+}
+
+/// Message types that `message::scrub_value` skips entirely.
+/// We detect them via cheap substring checks to avoid JSON parsing.
+const SKIP_PREFIXES: &[&str] = &[r#""type":"system""#, r#""type":"file-history-snapshot""#];
+
+fn is_skippable_message_type(line: &str) -> bool {
+    // Only inspect the first 60 bytes — the "type" field is always near the start.
+    let prefix = &line[..line.len().min(60)];
+    SKIP_PREFIXES.iter().any(|p| prefix.contains(p))
 }
 
 #[cfg(test)]

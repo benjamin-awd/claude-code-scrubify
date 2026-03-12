@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde_json::Value;
 
 use crate::allowlist::Allowlist;
@@ -117,40 +119,48 @@ pub fn scrub_text(
     // Sort by start offset
     spans.sort_by_key(|s| (s.start, std::cmp::Reverse(s.end)));
 
-    // Merge overlapping spans and build output
+    // Merge overlapping spans and build output in a single pass
     let mut result = String::with_capacity(text.len());
     let mut redactions: Vec<Redaction> = Vec::new();
     let mut pos = 0;
+    let mut cur_start = spans[0].start;
+    let mut cur_end = spans[0].end;
+    let mut cur_name = &spans[0].pattern_name;
 
-    let mut merged: Vec<(usize, usize, String)> = Vec::new();
-    for span in &spans {
-        if let Some(last) = merged.last_mut()
-            && span.start <= last.1
-        {
-            // Overlapping - extend
-            if span.end > last.1 {
-                last.1 = span.end;
+    for span in &spans[1..] {
+        if span.start <= cur_end {
+            // Overlapping — extend
+            if span.end > cur_end {
+                cur_end = span.end;
             }
-            continue;
+        } else {
+            // Emit the previous merged span
+            result.push_str(&text[pos..cur_start]);
+            write!(result, "[REDACTED:{cur_name}]").unwrap();
+            redactions.push(Redaction {
+                pattern_name: cur_name.clone(),
+                start: cur_start,
+                end: cur_end,
+                matched_text: text[cur_start..cur_end].to_string(),
+            });
+            pos = cur_end;
+            cur_start = span.start;
+            cur_end = span.end;
+            cur_name = &span.pattern_name;
         }
-        merged.push((span.start, span.end, span.pattern_name.clone()));
     }
 
-    for (start, end, name) in &merged {
-        if *start > pos {
-            result.push_str(&text[pos..*start]);
-        }
-        let matched = &text[*start..*end];
-        let replacement = format!("[REDACTED:{name}]");
-        result.push_str(&replacement);
-        redactions.push(Redaction {
-            pattern_name: name.clone(),
-            start: *start,
-            end: *end,
-            matched_text: matched.to_string(),
-        });
-        pos = *end;
-    }
+    // Emit the last merged span
+    result.push_str(&text[pos..cur_start]);
+    write!(result, "[REDACTED:{cur_name}]").unwrap();
+    redactions.push(Redaction {
+        pattern_name: cur_name.clone(),
+        start: cur_start,
+        end: cur_end,
+        matched_text: text[cur_start..cur_end].to_string(),
+    });
+    pos = cur_end;
+
     if pos < text.len() {
         result.push_str(&text[pos..]);
     }
