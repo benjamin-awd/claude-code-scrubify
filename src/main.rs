@@ -1,4 +1,5 @@
 mod hook;
+mod init;
 mod scan;
 
 use clap::{Parser, Subcommand};
@@ -36,6 +37,8 @@ struct Cli {
 enum Command {
     /// Run as a Claude Code Stop hook (reads session info from stdin)
     Hook,
+    /// Interactive setup wizard — installs hook and writes config
+    Init,
     /// Scan all JSONL files under ~/.claude/projects/
     Scan {
         /// Preview redactions without modifying files
@@ -79,6 +82,7 @@ fn main() {
     };
 
     match cli.command {
+        Command::Init => init::run_init(),
         Command::Hook => hook::run_hook(&entropy_cfg),
         Command::Scan {
             dry_run,

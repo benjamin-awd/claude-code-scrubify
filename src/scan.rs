@@ -109,15 +109,12 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
     }
 }
 
-const BOLD: &str = "\x1b[1m";
-const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
-const RESET: &str = "\x1b[0m";
-
 #[allow(clippy::print_stderr)] // intentional user-facing dry-run output
 fn print_unified_diff(path: &Path, diffs: &[LineDiff], no_truncate: bool) {
-    let path_str = path.display();
-    eprintln!("{BOLD}  {path_str}{RESET}");
+    use colored::Colorize;
+
+    let path_str = path.display().to_string();
+    eprintln!("  {}", path_str.bold());
     for diff in diffs {
         for r in &diff.redactions {
             let preview = if no_truncate {
@@ -125,9 +122,12 @@ fn print_unified_diff(path: &Path, diffs: &[LineDiff], no_truncate: bool) {
             } else {
                 truncate_secret(&r.matched_text, 40)
             };
+            let redacted = format!("[REDACTED:{}]", r.pattern_name);
             eprintln!(
-                "    L{}: {RED}{preview}{RESET} → {GREEN}[REDACTED:{}]{RESET}",
-                diff.line_number, r.pattern_name,
+                "    L{}: {} → {}",
+                diff.line_number,
+                preview.red(),
+                redacted.green(),
             );
         }
     }
