@@ -2,20 +2,27 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-
 use scrub_history::display::{BOLD, GREEN, RESET};
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Default)]
 struct ScrubberConfig {
     #[serde(default)]
     allowlist: AllowlistConfig,
+    #[serde(default)]
+    entropy: EntropyConfig,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 struct AllowlistConfig {
     #[serde(default)]
     hashes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct EntropyConfig {
+    #[serde(default)]
+    exclude_patterns: Vec<String>,
 }
 
 const HOOK_COMMAND: &str = "scrub-history hook";
@@ -139,19 +146,21 @@ fn install_hook(settings_path: &Path, async_hook: bool) -> Result<()> {
 
 #[allow(clippy::print_stdout)]
 fn write_config(config_path: &Path) -> Result<()> {
-    // Preserve existing allowlist hashes if the file already exists
-    let existing_hashes: Vec<String> = if config_path.exists() {
+    // Preserve existing settings if the file already exists
+    let existing: ScrubberConfig = if config_path.exists() {
         let data =
             std::fs::read_to_string(config_path).context("reading existing scrubber.toml")?;
-        let existing: ScrubberConfig = toml::from_str(&data).unwrap_or_default();
-        existing.allowlist.hashes
+        toml::from_str(&data).unwrap_or_default()
     } else {
-        Vec::new()
+        ScrubberConfig::default()
     };
 
     let config = ScrubberConfig {
         allowlist: AllowlistConfig {
-            hashes: existing_hashes,
+            hashes: existing.allowlist.hashes,
+        },
+        entropy: EntropyConfig {
+            exclude_patterns: existing.entropy.exclude_patterns,
         },
     };
 
@@ -216,10 +225,14 @@ mod tests {
             allowlist: AllowlistConfig {
                 hashes: vec!["abc123".into()],
             },
+            entropy: EntropyConfig {
+                exclude_patterns: vec![r"toolu_[A-Za-z0-9]+".into()],
+            },
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: ScrubberConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.allowlist.hashes, vec!["abc123"]);
+        assert_eq!(parsed.entropy.exclude_patterns, vec![r"toolu_[A-Za-z0-9]+"]);
     }
 
     #[test]
@@ -287,6 +300,9 @@ mod tests {
         let existing = ScrubberConfig {
             allowlist: AllowlistConfig {
                 hashes: vec!["hash1".into(), "hash2".into()],
+            },
+            entropy: EntropyConfig {
+                exclude_patterns: vec![r"msg_[A-Za-z0-9]+".into()],
             },
         };
         std::fs::write(&config_path, toml::to_string_pretty(&existing).unwrap()).unwrap();

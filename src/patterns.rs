@@ -1,7 +1,8 @@
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
-use std::path::PathBuf;
 
 pub struct SecretPattern {
     pub name: String,

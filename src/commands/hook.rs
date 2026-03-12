@@ -1,14 +1,14 @@
-use serde::Deserialize;
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing::{debug, error, info, warn};
 
 use scrub_history::allowlist;
 use scrub_history::entropy::EntropyConfig;
 use scrub_history::jsonl;
 use scrub_history::patterns::PatternSet;
 use scrub_history::stats;
+use serde::Deserialize;
+use tracing::{debug, error, info, warn};
 
 #[derive(Deserialize)]
 struct HookInput {

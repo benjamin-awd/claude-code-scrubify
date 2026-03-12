@@ -2,12 +2,11 @@ use std::cmp::Reverse;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use walkdir::WalkDir;
-
-use scrub_history::allowlist::Allowlist;
+use scrub_history::allowlist;
 use scrub_history::display::{self, BOLD, DIM, GREEN, RED, RESET, YELLOW};
 use scrub_history::patterns::PatternSet;
 use scrub_history::stats;
+use walkdir::WalkDir;
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 pub(crate) fn run_status() {
@@ -118,9 +117,9 @@ fn run_status_inner() -> Result<()> {
         Err(e) => println!("  Patterns:    {RED}error loading: {e}{RESET}"),
     }
 
-    match Allowlist::load() {
-        Ok(al) => {
-            let count = al.len();
+    match allowlist::load_config() {
+        Ok(settings) => {
+            let count = settings.allowlist.len();
             if count > 0 {
                 println!(
                     "  Allowlist:   {count} hash{}",
@@ -128,6 +127,13 @@ fn run_status_inner() -> Result<()> {
                 );
             } else {
                 println!("  Allowlist:   {DIM}empty{RESET}");
+            }
+            let ep_count = settings.entropy_exclude_patterns.len();
+            if ep_count > 0 {
+                println!(
+                    "  Entropy exclusions: {ep_count} pattern{}",
+                    if ep_count == 1 { "" } else { "s" }
+                );
             }
         }
         Err(e) => println!("  Allowlist:   {RED}error: {e}{RESET}"),

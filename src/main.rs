@@ -1,9 +1,8 @@
 mod commands;
 
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
-
 use scrub_history::entropy::EntropyConfig;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(

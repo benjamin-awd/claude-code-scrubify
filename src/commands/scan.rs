@@ -1,18 +1,18 @@
-use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tracing::{debug, error, info, warn};
-use walkdir::WalkDir;
 
+use rayon::prelude::*;
 use scrub_history::allowlist;
 use scrub_history::entropy::EntropyConfig;
 use scrub_history::jsonl::{self, LineDiff};
 use scrub_history::patterns::PatternSet;
 use scrub_history::stats;
+use tracing::{debug, error, info, warn};
+use walkdir::WalkDir;
 
 pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
