@@ -11,6 +11,8 @@ struct ScrubberConfig {
     allowlist: AllowlistConfig,
     #[serde(default)]
     entropy: EntropyConfig,
+    #[serde(default)]
+    blacklist: BlacklistConfig,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -23,6 +25,14 @@ struct AllowlistConfig {
 struct EntropyConfig {
     #[serde(default)]
     exclude_patterns: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct BlacklistConfig {
+    #[serde(default)]
+    strings: Vec<String>,
+    #[serde(default)]
+    hashes: Vec<String>,
 }
 
 const HOOK_COMMAND: &str = "scrub-history hook";
@@ -162,6 +172,10 @@ fn write_config(config_path: &Path) -> Result<()> {
         entropy: EntropyConfig {
             exclude_patterns: existing.entropy.exclude_patterns,
         },
+        blacklist: BlacklistConfig {
+            strings: existing.blacklist.strings,
+            hashes: existing.blacklist.hashes,
+        },
     };
 
     let toml_str = toml::to_string_pretty(&config).context("serializing scrubber.toml")?;
@@ -228,11 +242,17 @@ mod tests {
             entropy: EntropyConfig {
                 exclude_patterns: vec![r"toolu_[A-Za-z0-9]+".into()],
             },
+            blacklist: BlacklistConfig {
+                strings: vec!["my-secret-string".into()],
+                hashes: vec!["deadbeef".into()],
+            },
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: ScrubberConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.allowlist.hashes, vec!["abc123"]);
         assert_eq!(parsed.entropy.exclude_patterns, vec![r"toolu_[A-Za-z0-9]+"]);
+        assert_eq!(parsed.blacklist.strings, vec!["my-secret-string"]);
+        assert_eq!(parsed.blacklist.hashes, vec!["deadbeef"]);
     }
 
     #[test]
@@ -304,6 +324,10 @@ mod tests {
             entropy: EntropyConfig {
                 exclude_patterns: vec![r"msg_[A-Za-z0-9]+".into()],
             },
+            blacklist: BlacklistConfig {
+                strings: vec!["blacklisted1".into()],
+                hashes: vec!["blhash1".into()],
+            },
         };
         std::fs::write(&config_path, toml::to_string_pretty(&existing).unwrap()).unwrap();
 
@@ -312,6 +336,8 @@ mod tests {
         let data = std::fs::read_to_string(&config_path).unwrap();
         let parsed: ScrubberConfig = toml::from_str(&data).unwrap();
         assert_eq!(parsed.allowlist.hashes, vec!["hash1", "hash2"]);
+        assert_eq!(parsed.blacklist.strings, vec!["blacklisted1"]);
+        assert_eq!(parsed.blacklist.hashes, vec!["blhash1"]);
     }
 
     #[test]

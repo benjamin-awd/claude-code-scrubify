@@ -1,8 +1,5 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use regex::{Regex, RegexSet};
-use serde::Deserialize;
 
 pub struct SecretPattern {
     pub name: String,
@@ -21,16 +18,6 @@ pub struct PatternSet {
     pub quick_check: RegexSet,
     /// All unique keywords across every pattern, for cheap line-level pre-filtering.
     pub all_keywords: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct CustomPattern {
-    name: String,
-    regex: String,
-    #[serde(default)]
-    keywords: Vec<String>,
-    #[serde(default)]
-    secret_group: Option<usize>,
 }
 
 impl SecretPattern {
@@ -60,8 +47,18 @@ impl PatternSet {
     pub fn load(skip_custom: bool) -> Result<Self> {
         let mut patterns = built_in_patterns()?;
 
-        if !skip_custom && let Some(custom) = load_custom_patterns()? {
-            patterns.extend(custom);
+        if !skip_custom {
+            let settings = crate::allowlist::load_config()?;
+            for c in settings.custom_patterns {
+                let regex = Regex::new(&c.regex)
+                    .with_context(|| format!("invalid regex for custom pattern '{}'", c.name))?;
+                patterns.push(SecretPattern {
+                    name: c.name,
+                    regex,
+                    keywords: c.keywords,
+                    secret_group: c.secret_group,
+                });
+            }
         }
 
         let raw: Vec<&str> = patterns.iter().map(|p| p.regex.as_str()).collect();
@@ -239,36 +236,6 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
             })
         })
         .collect()
-}
-
-fn load_custom_patterns() -> Result<Option<Vec<SecretPattern>>> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return Ok(None);
-    };
-    let path = home.join(".claude").join("scrubber-patterns.json");
-    let data = match std::fs::read_to_string(&path) {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).context(format!("reading {}", path.display())),
-    };
-    let custom: Vec<CustomPattern> =
-        serde_json::from_str(&data).context(format!("parsing {}", path.display()))?;
-
-    let patterns: Vec<SecretPattern> = custom
-        .into_iter()
-        .map(|c| {
-            let regex = Regex::new(&c.regex)
-                .with_context(|| format!("invalid regex for custom pattern '{}'", c.name))?;
-            Ok(SecretPattern {
-                name: c.name,
-                regex,
-                keywords: c.keywords,
-                secret_group: c.secret_group,
-            })
-        })
-        .collect::<Result<_>>()?;
-
-    Ok(Some(patterns))
 }
 
 #[cfg(test)]

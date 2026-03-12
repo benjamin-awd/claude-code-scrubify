@@ -1,4 +1,3 @@
-use std::cmp::Reverse;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -80,19 +79,6 @@ fn run_status_inner() -> Result<()> {
         );
     }
 
-    let custom_patterns_path = claude_dir.join("scrubber-patterns.json");
-    if custom_patterns_path.exists() {
-        let data = std::fs::read_to_string(&custom_patterns_path)?;
-        let customs: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
-        println!(
-            "  scrubber-patterns.json: {GREEN}present{RESET} ({} custom pattern{})",
-            customs.len(),
-            if customs.len() == 1 { "" } else { "s" }
-        );
-    } else {
-        println!("  scrubber-patterns.json: {DIM}absent (optional){RESET}");
-    }
-
     println!();
     println!("{BOLD}Detection{RESET}");
 
@@ -134,6 +120,15 @@ fn run_status_inner() -> Result<()> {
                     "  Entropy exclusions: {ep_count} pattern{}",
                     if ep_count == 1 { "" } else { "s" }
                 );
+            }
+            let bl_count = settings.blacklist.len();
+            if bl_count > 0 {
+                println!(
+                    "  Blacklist:   {bl_count} entr{}",
+                    if bl_count == 1 { "y" } else { "ies" }
+                );
+            } else {
+                println!("  Blacklist:   {DIM}empty{RESET}");
             }
         }
         Err(e) => println!("  Allowlist:   {RED}error: {e}{RESET}"),
@@ -261,16 +256,6 @@ fn run_status_inner() -> Result<()> {
         if scan.files_scanned > 0 {
             let per_file = scan.duration_ms as f64 / scan.files_scanned as f64;
             println!("  Throughput: {per_file:.1}ms/file");
-        }
-
-        if !scan.redactions_by_pattern.is_empty() {
-            println!();
-            println!("  {BOLD}Redactions by pattern:{RESET}");
-            let mut sorted: Vec<_> = scan.redactions_by_pattern.iter().collect();
-            sorted.sort_by_key(|&(_, count)| Reverse(count));
-            for (name, count) in sorted {
-                println!("    {name}: {count}");
-            }
         }
     } else {
         println!("  {DIM}No scan runs recorded yet{RESET}");

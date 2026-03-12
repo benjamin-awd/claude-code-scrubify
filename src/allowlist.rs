@@ -17,6 +17,18 @@ struct Config {
     entropy: EntropyTomlConfig,
     #[serde(default)]
     blacklist: BlacklistConfig,
+    #[serde(default)]
+    patterns: Vec<CustomPatternConfig>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct CustomPatternConfig {
+    pub name: String,
+    pub regex: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub secret_group: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -49,6 +61,8 @@ pub struct ScrubberSettings {
     pub blacklist: Blacklist,
     /// User-defined regex patterns to exclude from entropy detection.
     pub entropy_exclude_patterns: Vec<String>,
+    /// User-defined secret detection patterns.
+    pub custom_patterns: Vec<CustomPatternConfig>,
 }
 
 pub struct Allowlist {
@@ -203,6 +217,7 @@ pub fn load_config() -> Result<ScrubberSettings> {
             allowlist: Allowlist::empty(),
             blacklist: Blacklist::empty(),
             entropy_exclude_patterns: Vec::new(),
+            custom_patterns: Vec::new(),
         });
     };
     let path = home.join(".claude").join("scrubber.toml");
@@ -213,6 +228,7 @@ pub fn load_config() -> Result<ScrubberSettings> {
                 allowlist: Allowlist::empty(),
                 blacklist: Blacklist::empty(),
                 entropy_exclude_patterns: Vec::new(),
+                custom_patterns: Vec::new(),
             });
         }
         Err(e) => return Err(e).context(format!("reading {}", path.display())),
@@ -270,6 +286,7 @@ pub fn load_config() -> Result<ScrubberSettings> {
             hashes: bl_hashes,
         },
         entropy_exclude_patterns: config.entropy.exclude_patterns,
+        custom_patterns: config.patterns,
     })
 }
 
