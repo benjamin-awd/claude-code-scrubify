@@ -1,4 +1,5 @@
 pub mod allowlist;
+pub mod cache;
 pub mod display;
 pub mod entropy;
 pub mod jsonl;

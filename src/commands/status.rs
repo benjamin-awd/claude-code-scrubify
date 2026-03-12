@@ -219,10 +219,17 @@ fn run_status_inner() -> Result<()> {
             "  Mode:       {}{mode}",
             if scan.dry_run { "dry-run" } else { "live" }
         );
-        println!(
-            "  Files:      {} scanned, {} modified",
-            scan.files_scanned, scan.files_modified
-        );
+        if scan.files_cached > 0 {
+            println!(
+                "  Files:      {} scanned, {} cached, {} modified",
+                scan.files_scanned, scan.files_cached, scan.files_modified
+            );
+        } else {
+            println!(
+                "  Files:      {} scanned, {} modified",
+                scan.files_scanned, scan.files_modified
+            );
+        }
         println!("  Redactions: {}", scan.total_redactions);
         if scan.errors > 0 {
             println!("  Errors:     {RED}{}{RESET}", scan.errors);

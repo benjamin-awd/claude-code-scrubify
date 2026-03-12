@@ -39,6 +39,8 @@ pub struct ScanRunStats {
     pub duration_ms: u64,
     pub dry_run: bool,
     #[serde(default)]
+    pub files_cached: u64,
+    #[serde(default)]
     pub redactions_by_pattern: HashMap<String, u64>,
 }
 

@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use scrub_history::allowlist;
+use scrub_history::cache;
 use scrub_history::entropy::EntropyConfig;
 use scrub_history::jsonl::{self, LineDiff};
 use scrub_history::patterns::PatternSet;
@@ -14,7 +15,12 @@ use scrub_history::stats;
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
-pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
+pub(crate) fn run_scan(
+    dry_run: bool,
+    no_truncate: bool,
+    no_cache: bool,
+    entropy_cfg: &EntropyConfig,
+) {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         error!("HOME not set");
         return;
@@ -64,12 +70,40 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         .extend(settings.entropy_exclude_patterns);
     let entropy_cfg = &entropy_cfg;
 
+    // Load mtime-based cache to skip unchanged files
+    let fingerprint = cache::compute_config_fingerprint(entropy_cfg.enabled, entropy_cfg.threshold);
+    let mut scan_cache = if no_cache {
+        cache::ScanCache::default()
+    } else {
+        cache::load(&fingerprint)
+    };
+
+    // Partition into cached (skip) vs uncached (need scan)
+    let existing_paths: std::collections::HashSet<String> = jsonl_files
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+
+    let (cached_files, uncached_files): (Vec<&PathBuf>, Vec<&PathBuf>) =
+        jsonl_files.iter().partition(|path| {
+            let key = path.display().to_string();
+            scan_cache
+                .entries
+                .get(&key)
+                .is_some_and(|entry| cache::file_metadata_matches(path, entry))
+        });
+
+    let files_cached = cached_files.len() as u64;
+    let files_to_scan = uncached_files.len();
+
+    info!(files_to_scan, files_cached, "cache partitioned files");
+
     let files_modified = AtomicU64::new(0);
     let redaction_counts: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
     let errors = AtomicU64::new(0);
 
     let scan_start = Instant::now();
-    jsonl_files.par_iter().for_each(|path| {
+    uncached_files.par_iter().for_each(|path| {
         match jsonl::scrub_jsonl_file(
             path,
             &pattern_set,
@@ -113,7 +147,8 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
     let counts = redaction_counts.lock().unwrap();
 
     info!(
-        files_scanned = total_files,
+        files_scanned = files_to_scan,
+        files_cached,
         files_modified = modified,
         errors = errs,
         duration_ms,
@@ -128,17 +163,35 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         }
     }
 
+    // Update cache with new entries for scanned files (skip during dry-run)
+    if !dry_run {
+        for path in &uncached_files {
+            let key = path.display().to_string();
+            if let Some(entry) = cache::cache_entry_from_path(path) {
+                scan_cache.entries.insert(key, entry);
+            }
+        }
+        // Prune entries for files that no longer exist
+        scan_cache.entries.retain(|k, _| existing_paths.contains(k));
+        scan_cache.config_fingerprint = fingerprint;
+
+        if let Err(e) = cache::save(&scan_cache) {
+            warn!(error = %e, "failed to persist scan cache");
+        }
+    }
+
     // Persist stats for `scrub-history status`
     let total_redactions: u64 = counts.values().sum();
     if let Ok(mut persistent) = stats::load() {
         persistent.last_scan = Some(stats::ScanRunStats {
             timestamp_epoch: stats::now_epoch(),
-            files_scanned: total_files as u64,
+            files_scanned: files_to_scan as u64,
             files_modified: modified,
             total_redactions,
             errors: errs,
             duration_ms,
             dry_run,
+            files_cached,
             redactions_by_pattern: counts.clone(),
         });
         if let Err(e) = stats::save(&persistent) {

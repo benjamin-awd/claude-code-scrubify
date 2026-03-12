@@ -45,6 +45,10 @@ enum Command {
         /// Show full secret values in dry-run output (no truncation)
         #[arg(long)]
         no_truncate: bool,
+
+        /// Disable mtime-based cache, force full rescan
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Show hook config, last run stats, coverage, and performance info
     Status,
@@ -87,7 +91,8 @@ fn main() {
         Command::Scan {
             dry_run,
             no_truncate,
-        } => commands::scan::run_scan(dry_run, no_truncate, &entropy_cfg),
+            no_cache,
+        } => commands::scan::run_scan(dry_run, no_truncate, no_cache, &entropy_cfg),
         Command::Status => commands::status::run_status(),
     }
 }
