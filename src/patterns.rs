@@ -9,6 +9,10 @@ pub(crate) struct SecretPattern {
     /// Cheap substring keywords — if non-empty, at least one must appear in the
     /// text before we bother running the regex.
     pub keywords: Vec<String>,
+    /// If set, only the capture group at this index is the actual secret to
+    /// redact. The rest of the regex match is context. `None` = redact the
+    /// entire match.
+    pub secret_group: Option<usize>,
 }
 
 pub(crate) struct PatternSet {
@@ -22,6 +26,8 @@ struct CustomPattern {
     regex: String,
     #[serde(default)]
     keywords: Vec<String>,
+    #[serde(default)]
+    secret_group: Option<usize>,
 }
 
 impl SecretPattern {
@@ -55,45 +61,61 @@ impl PatternSet {
 }
 
 fn built_in_patterns() -> Result<Vec<SecretPattern>> {
-    // (name, regex, keywords) — keywords are cheap substring checks run before
-    // the regex.  If the list is non-empty, at least one keyword must appear
-    // (case-insensitive) for the regex to fire.  Empty list = always run regex.
-    let defs: Vec<(&str, &str, &[&str])> = vec![
+    // (name, regex, keywords, secret_group)
+    //
+    // keywords: cheap substring checks run before the regex.  If the list is
+    //   non-empty, at least one keyword must appear (case-insensitive) for the
+    //   regex to fire.  Empty list = always run regex.
+    //
+    // secret_group: when Some(n), only capture group n is the secret to redact;
+    //   the surrounding match is context.  None = redact the entire match.
+    let defs: Vec<(&str, &str, &[&str], Option<usize>)> = vec![
         // AWS
         (
             "aws-access-key",
             r"(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}",
             &["akia", "abia", "acca", "asia"],
+            None,
         ),
         (
             "aws-secret-key",
-            r#"(?i)(?:aws_secret_access_key|aws_secret_key|secret_access_key)\s*[=:]\s*['"]?[A-Za-z0-9/+=]{40}['"]?"#,
+            r#"(?i)(?:aws_secret_access_key|aws_secret_key|secret_access_key)\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?"#,
             &["aws_secret", "secret_access_key"],
+            Some(1),
         ),
         // GitHub
         (
             "github-token",
             r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,255}",
             &["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
+            None,
         ),
         (
             "github-fine-grained",
             r"github_pat_[A-Za-z0-9_]{22,255}",
             &["github_pat_"],
+            None,
         ),
         // GitLab
-        ("gitlab-token", r"glpat-[A-Za-z0-9\-_]{20,}", &["glpat-"]),
+        (
+            "gitlab-token",
+            r"glpat-[A-Za-z0-9\-_]{20,}",
+            &["glpat-"],
+            None,
+        ),
         // JWT
         (
             "jwt",
             r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
             &["eyj"],
+            None,
         ),
         // Private keys
         (
             "private-key",
             r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
             &["private key"],
+            None,
         ),
         // Generic connection strings
         (
@@ -102,12 +124,14 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
             &[
                 "mysql://", "postgres", "mongodb", "redis://", "amqp://", "mssql://",
             ],
+            None,
         ),
-        // Password assignments (exclude variable refs like ${...} by disallowing $ in value)
+        // Password assignments — capture group 1 is the value (exclude variable refs)
         (
             "password-assignment",
-            r#"(?i)(?:password|passwd|pwd)\s*[=:]\s*['"][^\s'"$]{8,}['"]"#,
+            r#"(?i)(?:password|passwd|pwd)\s*[=:]\s*['"]([^\s'"$]{8,})['"]"#,
             &["password", "passwd", "pwd"],
+            Some(1),
         ),
         // Stripe
         (
@@ -116,35 +140,44 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
             &[
                 "sk_live", "sk_test", "pk_live", "pk_test", "rk_live", "rk_test",
             ],
+            None,
         ),
         // Slack
         (
             "slack-token",
             r"xox[bprs]-[A-Za-z0-9\-]{10,}",
             &["xoxb-", "xoxp-", "xoxr-", "xoxs-"],
+            None,
         ),
         (
             "slack-webhook",
             r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+",
             &["hooks.slack.com"],
+            None,
         ),
         // Anthropic
-        ("anthropic-key", r"sk-ant-[A-Za-z0-9\-_]{20,}", &["sk-ant-"]),
+        (
+            "anthropic-key",
+            r"sk-ant-[A-Za-z0-9\-_]{20,}",
+            &["sk-ant-"],
+            None,
+        ),
         // OpenAI (no hyphens after sk- prefix; real keys are alphanumeric only)
-        ("openai-key", r"sk-[A-Za-z0-9]{20,}", &["sk-"]),
+        ("openai-key", r"sk-[A-Za-z0-9]{20,}", &["sk-"], None),
         // Google
-        ("google-api-key", r"AIza[A-Za-z0-9\-_]{35}", &["aiza"]),
+        ("google-api-key", r"AIza[A-Za-z0-9\-_]{35}", &["aiza"], None),
         (
             "google-oauth-secret",
-            r#"(?i)client_secret['"]?\s*[=:]\s*['"]?GOCSPX-[A-Za-z0-9\-_]+"#,
+            r#"(?i)client_secret['"]?\s*[=:]\s*['"]?(GOCSPX-[A-Za-z0-9\-_]+)"#,
             &["gocspx-"],
+            Some(1),
         ),
         // npm
-        ("npm-token", r"npm_[A-Za-z0-9]{36}", &["npm_"]),
-        // Generic API key assignment
+        ("npm-token", r"npm_[A-Za-z0-9]{36}", &["npm_"], None),
+        // Generic API key assignment — capture group 1 is the value
         (
             "generic-api-key",
-            r#"(?i)(?:api_key|apikey|api_secret|secret_key|access_token)\s*[=:]\s*['"][A-Za-z0-9\-_./+=]{20,}['"]"#,
+            r#"(?i)(?:api_key|apikey|api_secret|secret_key|access_token)\s*[=:]\s*['"]([A-Za-z0-9\-_./+=]{20,})['"]"#,
             &[
                 "api_key",
                 "apikey",
@@ -152,31 +185,35 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
                 "secret_key",
                 "access_token",
             ],
+            Some(1),
         ),
-        // Heroku
+        // Heroku — capture group 1 is the UUID value
         (
             "heroku-api-key",
-            r#"(?i)heroku[_\s]*api[_\s]*key\s*[=:]\s*['"]?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#,
+            r#"(?i)heroku[_\s]*api[_\s]*key\s*[=:]\s*['"]?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"#,
             &["heroku"],
+            Some(1),
         ),
         // Twilio
-        ("twilio-api-key", r"SK[0-9a-fA-F]{32}", &["sk"]),
+        ("twilio-api-key", r"SK[0-9a-fA-F]{32}", &["sk"], None),
         // SendGrid
         (
             "sendgrid-key",
             r"SG\.[A-Za-z0-9\-_]{22,}\.[A-Za-z0-9\-_]{22,}",
             &["sg."],
+            None,
         ),
     ];
 
     defs.into_iter()
-        .map(|(name, pattern, keywords)| {
+        .map(|(name, pattern, keywords, secret_group)| {
             let regex = Regex::new(pattern)
                 .with_context(|| format!("invalid regex for pattern '{name}'"))?;
             Ok(SecretPattern {
                 name: name.to_string(),
                 regex,
                 keywords: keywords.iter().map(|k| (*k).to_string()).collect(),
+                secret_group,
             })
         })
         .collect()
@@ -204,6 +241,7 @@ fn load_custom_patterns() -> Result<Option<Vec<SecretPattern>>> {
                 name: c.name,
                 regex,
                 keywords: c.keywords,
+                secret_group: c.secret_group,
             })
         })
         .collect::<Result<_>>()?;

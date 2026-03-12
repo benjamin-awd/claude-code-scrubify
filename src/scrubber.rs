@@ -36,15 +36,25 @@ pub(crate) fn scrub_text(
         if !pat.keyword_hit(text) {
             continue;
         }
-        for m in pat.regex.find_iter(text) {
-            let matched = m.as_str();
-            if KNOWN_EXAMPLES.iter().any(|ex| matched.contains(ex)) {
+        for caps in pat.regex.captures_iter(text) {
+            let full = caps.get(0).unwrap();
+            if KNOWN_EXAMPLES.iter().any(|ex| full.as_str().contains(ex)) {
                 continue;
             }
+            // If secret_group is set, redact only that capture group
+            let (start, end) = if let Some(group) = pat.secret_group {
+                if let Some(g) = caps.get(group) {
+                    (g.start(), g.end())
+                } else {
+                    (full.start(), full.end())
+                }
+            } else {
+                (full.start(), full.end())
+            };
             spans.push(Redaction {
                 pattern_name: pat.name.clone(),
-                start: m.start(),
-                end: m.end(),
+                start,
+                end,
                 matched_text: String::new(), // filled after merging
             });
         }
@@ -163,6 +173,21 @@ mod tests {
         let (second_pass, redactions) = scrub_text(&first_pass, &ps, &no_entropy());
         assert_eq!(first_pass, second_pass);
         assert!(redactions.is_empty());
+    }
+
+    #[test]
+    fn secret_group_redacts_only_value() {
+        let ps = test_pattern_set();
+        let input = r#"password = "my_super_secret_password""#;
+        let (result, redactions) = scrub_text(input, &ps, &no_entropy());
+        // The key name should be preserved, only the value redacted
+        assert!(
+            result.contains("password"),
+            "key name should be preserved: {result}"
+        );
+        assert!(result.contains("[REDACTED:password-assignment]"));
+        assert!(!result.contains("my_super_secret_password"));
+        assert_eq!(redactions.len(), 1);
     }
 
     #[test]
