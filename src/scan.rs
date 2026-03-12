@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
@@ -11,6 +12,7 @@ use scrub_history::allowlist::Allowlist;
 use scrub_history::entropy::EntropyConfig;
 use scrub_history::jsonl::{self, LineDiff};
 use scrub_history::patterns::PatternSet;
+use scrub_history::stats;
 
 pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyConfig) {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
@@ -59,6 +61,7 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
     let redaction_counts: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
     let errors = AtomicU64::new(0);
 
+    let scan_start = Instant::now();
     jsonl_files.par_iter().for_each(|path| {
         match jsonl::scrub_jsonl_file(path, &pattern_set, entropy_cfg, &allowlist, dry_run) {
             Ok(result) => {
@@ -89,6 +92,8 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         }
     });
 
+    #[allow(clippy::cast_possible_truncation)] // duration in ms won't exceed u64
+    let duration_ms = scan_start.elapsed().as_millis() as u64;
     let modified = files_modified.load(Ordering::Relaxed);
     let errs = errors.load(Ordering::Relaxed);
     let counts = redaction_counts.lock().unwrap();
@@ -97,6 +102,7 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         files_scanned = total_files,
         files_modified = modified,
         errors = errs,
+        duration_ms,
         "scan complete"
     );
 
@@ -105,6 +111,24 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         sorted.sort_by_key(|&(_, count)| Reverse(count));
         for (name, count) in sorted {
             info!(pattern = %name, count, "redactions by pattern");
+        }
+    }
+
+    // Persist stats for `scrub-history status`
+    let total_redactions: u64 = counts.values().sum();
+    if let Ok(mut persistent) = stats::load() {
+        persistent.last_scan = Some(stats::ScanRunStats {
+            timestamp_epoch: stats::now_epoch(),
+            files_scanned: total_files as u64,
+            files_modified: modified,
+            total_redactions,
+            errors: errs,
+            duration_ms,
+            dry_run,
+            redactions_by_pattern: counts.clone(),
+        });
+        if let Err(e) = stats::save(&persistent) {
+            warn!(error = %e, "failed to persist scan stats");
         }
     }
 }

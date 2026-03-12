@@ -1,6 +1,7 @@
 mod hook;
 mod init;
 mod scan;
+mod status;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -49,6 +50,8 @@ enum Command {
         #[arg(long)]
         no_truncate: bool,
     },
+    /// Show hook config, last run stats, coverage, and performance info
+    Status,
 }
 
 fn main() {
@@ -88,5 +91,6 @@ fn main() {
             dry_run,
             no_truncate,
         } => scan::run_scan(dry_run, no_truncate, &entropy_cfg),
+        Command::Status => status::run_status(),
     }
 }

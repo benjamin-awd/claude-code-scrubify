@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-const GREEN: &str = "\x1b[32m";
-const BOLD: &str = "\x1b[1m";
-const RESET: &str = "\x1b[0m";
+use scrub_history::display::{BOLD, GREEN, RESET};
 
 #[derive(Serialize, Deserialize, Default)]
 struct ScrubberConfig {

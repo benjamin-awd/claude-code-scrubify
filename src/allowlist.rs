@@ -48,6 +48,14 @@ impl Allowlist {
         Ok(Allowlist { hashes })
     }
 
+    pub fn len(&self) -> usize {
+        self.hashes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hashes.is_empty()
+    }
+
     pub fn empty() -> Self {
         Allowlist {
             hashes: HashSet::new(),

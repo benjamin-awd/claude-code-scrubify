@@ -1,12 +1,14 @@
 use serde::Deserialize;
 use std::io::Read;
 use std::path::PathBuf;
+use std::time::Instant;
 use tracing::{error, info, warn};
 
 use scrub_history::allowlist::Allowlist;
 use scrub_history::entropy::EntropyConfig;
 use scrub_history::jsonl;
 use scrub_history::patterns::PatternSet;
+use scrub_history::stats;
 
 #[derive(Deserialize)]
 struct HookInput {
@@ -67,14 +69,31 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
     let pattern_set = PatternSet::load(false)?;
     let allowlist = Allowlist::load()?;
 
+    let start = Instant::now();
     let result = jsonl::scrub_jsonl_file(&canonical, &pattern_set, entropy_cfg, &allowlist, false)?;
+    #[allow(clippy::cast_possible_truncation)] // duration in ms won't exceed u64
+    let duration_ms = start.elapsed().as_millis() as u64;
 
-    if !result.redactions.is_empty() {
+    let redaction_count = result.redactions.len() as u64;
+    if redaction_count > 0 {
         info!(
-            count = result.redactions.len(),
+            count = redaction_count,
             file = %canonical.display(),
             "scrub-history: redacted secret(s)"
         );
+    }
+
+    // Persist stats for `scrub-history status`
+    if let Ok(mut persistent) = stats::load() {
+        persistent.last_hook = Some(stats::HookRunStats {
+            timestamp_epoch: stats::now_epoch(),
+            file: canonical.display().to_string(),
+            redactions: redaction_count,
+            duration_ms,
+        });
+        if let Err(e) = stats::save(&persistent) {
+            warn!(error = %e, "failed to persist hook stats");
+        }
     }
 
     Ok(())

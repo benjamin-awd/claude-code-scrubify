@@ -1,6 +1,8 @@
 pub mod allowlist;
+pub mod display;
 pub mod entropy;
 pub mod jsonl;
 pub mod message;
 pub mod patterns;
 pub mod scrubber;
+pub mod stats;
