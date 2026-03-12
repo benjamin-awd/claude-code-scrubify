@@ -85,11 +85,13 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
 
     // Persist stats for `scrub-history status`
     if let Ok(mut persistent) = stats::load() {
-        persistent.last_hook = Some(stats::HookRunStats {
+        let file_size_bytes = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
+        persistent.push_hook_run(stats::HookRunStats {
             timestamp_epoch: stats::now_epoch(),
             file: canonical.display().to_string(),
             redactions: redaction_count,
             duration_ms,
+            file_size_bytes,
         });
         if let Err(e) = stats::save(&persistent) {
             warn!(error = %e, "failed to persist hook stats");

@@ -167,20 +167,55 @@ fn run_status_inner() -> Result<()> {
     let persistent = stats::load().unwrap_or_default();
 
     println!();
-    println!("{BOLD}Last Hook Run{RESET}");
+    println!(
+        "{BOLD}Hook Latency{RESET}  {DIM}(how much scrub-history slows down each session end){RESET}"
+    );
     if let Some(ref hook) = persistent.last_hook {
         println!(
-            "  When:       {} ({})",
+            "  Last run:   {} ({})",
             display::format_epoch(hook.timestamp_epoch),
             display::format_relative(hook.timestamp_epoch),
         );
-        println!("  File:       {}", hook.file);
-        println!("  Redactions: {}", hook.redactions);
         println!(
-            "  Duration:   {}",
+            "  Last file:  {} ({})",
+            hook.file,
+            display::format_bytes(hook.file_size_bytes),
+        );
+        println!(
+            "  Last time:  {}",
             display::format_duration_ms(hook.duration_ms),
         );
-    } else {
+    }
+    if let Some(summary) = persistent.hook_latency() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let avg_ms = summary.avg_ms.round() as u64;
+        println!(
+            "  Avg:        {} over {} run{}",
+            display::format_duration_ms(avg_ms),
+            summary.count,
+            if summary.count == 1 { "" } else { "s" },
+        );
+        if summary.count >= 2 {
+            println!(
+                "  p50:        {}",
+                display::format_duration_ms(summary.p50_ms),
+            );
+        }
+        if summary.count >= 5 {
+            println!(
+                "  p95:        {}",
+                display::format_duration_ms(summary.p95_ms),
+            );
+        }
+        println!(
+            "  Max:        {}",
+            display::format_duration_ms(summary.max_ms),
+        );
+        println!(
+            "  Total:      {} added across all recorded runs",
+            display::format_duration_ms(summary.total_ms),
+        );
+    } else if persistent.last_hook.is_none() {
         println!("  {DIM}No hook runs recorded yet{RESET}");
     }
 

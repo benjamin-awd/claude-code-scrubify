@@ -1,7 +1,4 @@
-mod hook;
-mod init;
-mod scan;
-mod status;
+mod commands;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -85,12 +82,12 @@ fn main() {
     };
 
     match cli.command {
-        Command::Init => init::run_init(),
-        Command::Hook => hook::run_hook(&entropy_cfg),
+        Command::Init => commands::init::run_init(),
+        Command::Hook => commands::hook::run_hook(&entropy_cfg),
         Command::Scan {
             dry_run,
             no_truncate,
-        } => scan::run_scan(dry_run, no_truncate, &entropy_cfg),
-        Command::Status => status::run_status(),
+        } => commands::scan::run_scan(dry_run, no_truncate, &entropy_cfg),
+        Command::Status => commands::status::run_status(),
     }
 }
