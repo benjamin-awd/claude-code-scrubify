@@ -86,6 +86,11 @@ pub fn scrub_text(
             if end - start < MIN_SECRET_LEN {
                 continue;
             }
+            // Skip already-redacted placeholders to stay idempotent when
+            // a secret_group pattern preserves surrounding context.
+            if text[start..end].starts_with("[REDACTED:") {
+                continue;
+            }
             if allowlist.is_allowed(&text[start..end]) {
                 continue;
             }
@@ -289,6 +294,21 @@ mod tests {
             scrub_text(&first_pass, &ps, &no_entropy(), &no_allowlist());
         assert_eq!(first_pass, second_pass);
         assert!(redactions.is_empty());
+    }
+
+    #[test]
+    fn idempotent_secret_group() {
+        let ps = test_pattern_set();
+        let input = r#"password = "my_super_secret_password""#;
+        let (first_pass, r1) = scrub_text(input, &ps, &no_entropy(), &no_allowlist());
+        assert_eq!(r1.len(), 1);
+        // Second pass on already-redacted text should find nothing
+        let (second_pass, r2) = scrub_text(&first_pass, &ps, &no_entropy(), &no_allowlist());
+        assert_eq!(first_pass, second_pass);
+        assert!(
+            r2.is_empty(),
+            "re-scrubbing should not match [REDACTED:...] placeholders"
+        );
     }
 
     #[test]
