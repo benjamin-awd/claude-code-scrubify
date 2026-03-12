@@ -71,15 +71,13 @@ fn run_status_inner() -> Result<()> {
     }
 
     println!();
-    println!("{BOLD}Config Files{RESET}");
+    println!("{BOLD}Config{RESET}");
 
     let config_path = claude_dir.join("scrubber.toml");
     if config_path.exists() {
-        println!("  scrubber.toml:         {GREEN}present{RESET}");
+        println!("  scrubber.toml: {GREEN}present{RESET}");
     } else {
-        println!(
-            "  scrubber.toml:         {YELLOW}absent{RESET}  {DIM}(run `scrub-history init`){RESET}"
-        );
+        println!("  scrubber.toml: {YELLOW}absent{RESET}  {DIM}(run `scrub-history init`){RESET}");
     }
 
     println!();
@@ -196,34 +194,26 @@ fn run_status_inner() -> Result<()> {
             display::format_duration_ms(hook.duration_ms),
         );
     }
-    if let Some(summary) = persistent.hook_latency() {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let avg_ms = summary.avg_ms.round() as u64;
+    if persistent.hook_history.len() >= 2 {
+        let durations: Vec<u64> = persistent
+            .hook_history
+            .iter()
+            .map(|r| r.duration_ms)
+            .collect();
+        let redactions: Vec<u64> = persistent
+            .hook_history
+            .iter()
+            .map(|r| r.redactions)
+            .collect();
+        let shown = durations.len().min(30);
         println!(
-            "  Avg:        {} over {} run{}",
-            display::format_duration_ms(avg_ms),
-            summary.count,
-            if summary.count == 1 { "" } else { "s" },
+            "  Latency:    {GREEN}{}{RESET}  (last {shown} runs)",
+            display::sparkline(&durations),
         );
-        if summary.count >= 2 {
-            println!(
-                "  p50:        {}",
-                display::format_duration_ms(summary.p50_ms),
-            );
-        }
-        if summary.count >= 5 {
-            println!(
-                "  p95:        {}",
-                display::format_duration_ms(summary.p95_ms),
-            );
-        }
+        let total_redactions: u64 = redactions.iter().sum();
         println!(
-            "  Max:        {}",
-            display::format_duration_ms(summary.max_ms),
-        );
-        println!(
-            "  Total:      {} added across all recorded runs",
-            display::format_duration_ms(summary.total_ms),
+            "  Redactions: {GREEN}{}{RESET}  ({total_redactions} total)",
+            display::sparkline(&redactions),
         );
     } else if persistent.last_hook.is_none() {
         println!("  {DIM}No hook runs recorded yet{RESET}");

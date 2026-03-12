@@ -101,6 +101,41 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+const SPARK_CHARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Maximum number of data points to display in a sparkline.
+const SPARK_MAX_WIDTH: usize = 30;
+
+/// Render a sparkline string from a slice of u64 values.
+/// If the input has more than `SPARK_MAX_WIDTH` points, the tail is used.
+/// Returns an empty string if the input is empty.
+pub fn sparkline(values: &[u64]) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    let values = if values.len() > SPARK_MAX_WIDTH {
+        &values[values.len() - SPARK_MAX_WIDTH..]
+    } else {
+        values
+    };
+    let max = *values.iter().max().unwrap_or(&0);
+    if max == 0 {
+        return SPARK_CHARS[0].to_string().repeat(values.len());
+    }
+    values
+        .iter()
+        .map(|&v| {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let idx = ((v as f64 / max as f64) * (SPARK_CHARS.len() - 1) as f64).round() as usize;
+            SPARK_CHARS[idx.min(SPARK_CHARS.len() - 1)]
+        })
+        .collect()
+}
+
 /// Current time as seconds since the Unix epoch.
 pub fn now_epoch() -> u64 {
     SystemTime::now()
@@ -131,5 +166,26 @@ mod tests {
         assert_eq!(format_bytes(500), "500 B");
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MB");
+    }
+
+    #[test]
+    fn sparkline_empty() {
+        assert_eq!(sparkline(&[]), "");
+    }
+
+    #[test]
+    fn sparkline_all_zeros() {
+        assert_eq!(sparkline(&[0, 0, 0]), "▁▁▁");
+    }
+
+    #[test]
+    fn sparkline_range() {
+        let s = sparkline(&[0, 50, 100]);
+        assert_eq!(s, "▁▅█");
+    }
+
+    #[test]
+    fn sparkline_single_value() {
+        assert_eq!(sparkline(&[42]), "█");
     }
 }
