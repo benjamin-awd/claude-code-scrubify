@@ -109,10 +109,15 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
     }
 }
 
+const BOLD: &str = "\x1b[1m";
+const RED: &str = "\x1b[31m";
+const GREEN: &str = "\x1b[32m";
+const RESET: &str = "\x1b[0m";
+
 #[allow(clippy::print_stderr)] // intentional user-facing dry-run output
 fn print_unified_diff(path: &Path, diffs: &[LineDiff], no_truncate: bool) {
     let path_str = path.display();
-    eprintln!("\x1b[1m  {path_str}\x1b[0m");
+    eprintln!("{BOLD}  {path_str}{RESET}");
     for diff in diffs {
         for r in &diff.redactions {
             let preview = if no_truncate {
@@ -121,7 +126,7 @@ fn print_unified_diff(path: &Path, diffs: &[LineDiff], no_truncate: bool) {
                 truncate_secret(&r.matched_text, 40)
             };
             eprintln!(
-                "    L{}: \x1b[31m{preview}\x1b[0m → \x1b[32m[REDACTED:{}]\x1b[0m",
+                "    L{}: {RED}{preview}{RESET} → {GREEN}[REDACTED:{}]{RESET}",
                 diff.line_number, r.pattern_name,
             );
         }
