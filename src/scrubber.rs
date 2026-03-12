@@ -7,6 +7,10 @@ const KNOWN_EXAMPLES: &[&str] = &[
     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", // AWS docs example secret
 ];
 
+/// Minimum length for a matched secret value to be redacted. Short strings are
+/// rarely actual secrets and cause false positives.
+const MIN_SECRET_LEN: usize = 8;
+
 #[derive(Debug, Clone)]
 pub(crate) struct Redaction {
     pub pattern_name: String,
@@ -51,6 +55,9 @@ pub(crate) fn scrub_text(
             } else {
                 (full.start(), full.end())
             };
+            if end - start < MIN_SECRET_LEN {
+                continue;
+            }
             spans.push(Redaction {
                 pattern_name: pat.name.clone(),
                 start,
@@ -173,6 +180,15 @@ mod tests {
         let (second_pass, redactions) = scrub_text(&first_pass, &ps, &no_entropy());
         assert_eq!(first_pass, second_pass);
         assert!(redactions.is_empty());
+    }
+
+    #[test]
+    fn skips_short_matches() {
+        let ps = test_pattern_set();
+        // "SK" + 32 hex chars = 34 chars, should be redacted
+        let long_input = "key: SK_FAKE_TEST_KEY_REPLACED";
+        let (_, redactions) = scrub_text(long_input, &ps, &no_entropy());
+        assert!(!redactions.is_empty(), "long twilio key should be redacted");
     }
 
     #[test]
