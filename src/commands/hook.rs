@@ -69,6 +69,7 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
     let pattern_set = PatternSet::load(false)?;
     let settings = allowlist::load_config()?;
     let allowlist = settings.allowlist;
+    let blacklist = settings.blacklist;
 
     // Merge file-based exclude patterns into the CLI-supplied entropy config
     let mut entropy_cfg = entropy_cfg.clone();
@@ -77,8 +78,14 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
         .extend(settings.entropy_exclude_patterns);
 
     let start = Instant::now();
-    let result =
-        jsonl::scrub_jsonl_file(&canonical, &pattern_set, &entropy_cfg, &allowlist, false)?;
+    let result = jsonl::scrub_jsonl_file(
+        &canonical,
+        &pattern_set,
+        &entropy_cfg,
+        &allowlist,
+        &blacklist,
+        false,
+    )?;
     #[allow(clippy::cast_possible_truncation)] // duration in ms won't exceed u64
     let duration_ms = start.elapsed().as_millis() as u64;
 

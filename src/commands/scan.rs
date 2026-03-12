@@ -57,6 +57,7 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
         }
     };
     let allowlist = settings.allowlist;
+    let blacklist = settings.blacklist;
     let mut entropy_cfg = entropy_cfg.clone();
     entropy_cfg
         .exclude_patterns
@@ -69,7 +70,14 @@ pub(crate) fn run_scan(dry_run: bool, no_truncate: bool, entropy_cfg: &EntropyCo
 
     let scan_start = Instant::now();
     jsonl_files.par_iter().for_each(|path| {
-        match jsonl::scrub_jsonl_file(path, &pattern_set, entropy_cfg, &allowlist, dry_run) {
+        match jsonl::scrub_jsonl_file(
+            path,
+            &pattern_set,
+            entropy_cfg,
+            &allowlist,
+            &blacklist,
+            dry_run,
+        ) {
             Ok(result) => {
                 if !result.redactions.is_empty() {
                     files_modified.fetch_add(1, Ordering::Relaxed);
