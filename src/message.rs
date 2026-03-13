@@ -21,14 +21,7 @@ pub fn scrub_value(
 
     match msg_type {
         "system" | "file-history-snapshot" => Vec::new(),
-        "user" => scrub_at_path(
-            value,
-            &["message", "content"],
-            pattern_set,
-            entropy_cfg,
-            al,
-            bl,
-        ),
+        "user" => scrub_user_message(value, pattern_set, entropy_cfg, al, bl),
         "assistant" => scrub_assistant_message(value, pattern_set, entropy_cfg, al, bl),
         "progress" => scrub_at_path(
             value,
@@ -44,6 +37,23 @@ pub fn scrub_value(
             scrub_all_strings(value, pattern_set, entropy_cfg, al, bl)
         }
     }
+}
+
+fn scrub_user_message(
+    value: &mut Value,
+    ps: &PatternSet,
+    ec: &EntropyConfig,
+    al: &Allowlist,
+    bl: &Blacklist,
+) -> Vec<Redaction> {
+    let mut redactions = scrub_at_path(value, &["message", "content"], ps, ec, al, bl);
+
+    // toolUseResult contains stdout/stderr from tool executions
+    if let Some(tool_result) = value.get_mut("toolUseResult") {
+        redactions.extend(scrub_all_strings(tool_result, ps, ec, al, bl));
+    }
+
+    redactions
 }
 
 fn scrub_assistant_message(
