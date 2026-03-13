@@ -77,49 +77,79 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
         .exclude_patterns
         .extend(settings.entropy_exclude_patterns);
 
-    let start = Instant::now();
-    let result = jsonl::scrub_jsonl_file(
-        &canonical,
-        &pattern_set,
-        &entropy_cfg,
-        &allowlist,
-        &blacklist,
-        false,
-    )?;
-    #[allow(clippy::cast_possible_truncation)] // duration in ms won't exceed u64
-    let duration_ms = start.elapsed().as_millis() as u64;
+    // Collect all files to scrub: the main transcript + any subagent transcripts
+    let mut files_to_scrub = vec![canonical.clone()];
 
-    let redaction_count = result.redactions.len() as u64;
-    if redaction_count > 0 {
-        info!(
-            count = redaction_count,
-            duration_ms,
-            file = %canonical.display(),
-            "scrub-history: redacted secret(s)"
-        );
-        for r in &result.redactions {
-            let preview = super::scan::truncate_secret(&r.matched_text, 40);
-            debug!(
-                pattern = %r.pattern_name,
-                matched = preview,
-                "redacted"
-            );
+    // Look for subagent JSONL files in the same session directory
+    if let Some(session_dir) = canonical.parent() {
+        let subagents_dir = session_dir.join("subagents");
+        if subagents_dir.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&subagents_dir)
+        {
+            for entry in entries.filter_map(Result::ok) {
+                let p = entry.path();
+                if p.extension().is_some_and(|ext| ext == "jsonl") {
+                    files_to_scrub.push(p);
+                }
+            }
         }
     }
 
-    // Persist stats for `scrub-history status`
-    if let Ok(mut persistent) = stats::load() {
-        let file_size_bytes = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
-        persistent.push_hook_run(stats::HookRunStats {
-            timestamp_epoch: stats::now_epoch(),
-            file: canonical.display().to_string(),
-            redactions: redaction_count,
-            duration_ms,
-            file_size_bytes,
-        });
-        if let Err(e) = stats::save(&persistent) {
-            warn!(error = %e, "failed to persist hook stats");
+    let mut persistent = stats::load().ok();
+
+    for file in &files_to_scrub {
+        let start = Instant::now();
+        let result = match jsonl::scrub_jsonl_file(
+            file,
+            &pattern_set,
+            &entropy_cfg,
+            &allowlist,
+            &blacklist,
+            false,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, file = %file.display(), "failed to scrub file");
+                continue;
+            }
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let redaction_count = result.redactions.len() as u64;
+        if redaction_count > 0 {
+            info!(
+                count = redaction_count,
+                duration_ms,
+                file = %file.display(),
+                "scrub-history: redacted secret(s)"
+            );
+            for r in &result.redactions {
+                let preview = super::scan::truncate_secret(&r.matched_text, 40);
+                debug!(
+                    pattern = %r.pattern_name,
+                    matched = preview,
+                    "redacted"
+                );
+            }
         }
+
+        if let Some(ref mut persistent) = persistent {
+            let file_size_bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+            persistent.push_hook_run(stats::HookRunStats {
+                timestamp_epoch: stats::now_epoch(),
+                file: file.display().to_string(),
+                redactions: redaction_count,
+                duration_ms,
+                file_size_bytes,
+            });
+        }
+    }
+
+    if let Some(ref persistent) = persistent
+        && let Err(e) = stats::save(persistent)
+    {
+        warn!(error = %e, "failed to persist hook stats");
     }
 
     Ok(())
