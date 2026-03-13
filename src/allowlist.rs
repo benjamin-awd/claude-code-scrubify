@@ -6,8 +6,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
-/// Minimum length for a blacklist entry. Matches `MIN_SECRET_LEN` in scrubber.
-const MIN_BLACKLIST_ENTRY_LEN: usize = 8;
+/// Default minimum length for a blacklist entry. Matches `MIN_SECRET_LEN` in scrubber.
+const DEFAULT_MIN_BLACKLIST_ENTRY_LEN: usize = 8;
 
 #[derive(Deserialize, Default)]
 struct Config {
@@ -53,6 +53,9 @@ struct BlacklistConfig {
     /// SHA-256 hashes of values that should always be redacted (exact match).
     #[serde(default)]
     hashes: Vec<String>,
+    /// Minimum string length for blacklist entries (default: 8).
+    #[serde(default)]
+    min_string_length: Option<usize>,
 }
 
 /// Everything loaded from `~/.claude/scrubber.toml`.
@@ -249,13 +252,17 @@ pub fn load_config() -> Result<ScrubberSettings> {
     }
 
     // Build blacklist: filter short entries, deduplicate, sort longest-first
+    let min_len = config
+        .blacklist
+        .min_string_length
+        .unwrap_or(DEFAULT_MIN_BLACKLIST_ENTRY_LEN);
     let mut bl_entries: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     for s in config.blacklist.strings {
-        if s.len() < MIN_BLACKLIST_ENTRY_LEN {
+        if s.len() < min_len {
             warn!(
                 entry = %s,
-                min_len = MIN_BLACKLIST_ENTRY_LEN,
+                min_len,
                 "blacklist entry too short, ignoring"
             );
             continue;
@@ -350,13 +357,13 @@ mod tests {
     fn blacklist_short_strings_filtered_in_config() {
         // Simulate what load_config does
         let short = "abc";
-        assert!(short.len() < MIN_BLACKLIST_ENTRY_LEN);
+        assert!(short.len() < DEFAULT_MIN_BLACKLIST_ENTRY_LEN);
         // from_strings is for tests and doesn't filter, but load_config does
         // Test the filtering logic directly
         let strings = vec!["short".to_string(), "this-is-long-enough".to_string()];
         let mut entries = Vec::new();
         for s in strings {
-            if s.len() >= MIN_BLACKLIST_ENTRY_LEN {
+            if s.len() >= DEFAULT_MIN_BLACKLIST_ENTRY_LEN {
                 entries.push(s);
             }
         }
