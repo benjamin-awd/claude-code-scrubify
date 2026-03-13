@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use scrub_history::display::{BOLD, GREEN, RESET};
+use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Default)]
@@ -72,7 +72,7 @@ fn run_init_inner() -> Result<()> {
 
     println!();
 
-    println!("{BOLD}Configuring scrub-history...{RESET}");
+    println!("{}", "Configuring scrub-history...".bold());
     println!();
 
     // Step 1: Ask whether the hook should run in the background
@@ -137,8 +137,9 @@ fn install_hook(settings_path: &Path, async_hook: bool) -> Result<()> {
 
     if already_installed {
         println!(
-            "2. Hook already present in {} {GREEN}\u{2713}{RESET}",
+            "2. Hook already present in {} {}",
             settings_path.display(),
+            "\u{2713}".green(),
         );
     } else {
         stop_array.push(build_hook_entry(async_hook));
@@ -146,8 +147,9 @@ fn install_hook(settings_path: &Path, async_hook: bool) -> Result<()> {
         std::fs::write(settings_path, pretty.as_bytes()).context("writing settings.json")?;
         let mode = if async_hook { "async" } else { "sync" };
         println!(
-            "2. Hook installed ({mode}) in {} {GREEN}\u{2713}{RESET}",
+            "2. Hook installed ({mode}) in {} {}",
             settings_path.display(),
+            "\u{2713}".green(),
         );
     }
 
@@ -182,8 +184,9 @@ fn write_config(config_path: &Path) -> Result<()> {
     std::fs::write(config_path, toml_str.as_bytes()).context("writing scrubber.toml")?;
 
     println!(
-        "3. Writing config to {} {GREEN}\u{2713}{RESET}",
+        "3. Writing config to {} {}",
         config_path.display(),
+        "\u{2713}".green(),
     );
 
     Ok(())

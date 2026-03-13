@@ -1,13 +1,26 @@
-//! Shared ANSI color constants and formatting helpers for terminal output.
+//! Shared formatting helpers for terminal output.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const GREEN: &str = "\x1b[32m";
-pub const RED: &str = "\x1b[31m";
-pub const YELLOW: &str = "\x1b[33m";
-pub const BOLD: &str = "\x1b[1m";
-pub const DIM: &str = "\x1b[2m";
-pub const RESET: &str = "\x1b[0m";
+use colored::Colorize;
+
+/// Print a section header: `\nSection Name`
+#[allow(clippy::print_stdout)]
+pub fn section(name: &str) {
+    println!("\n{}", name.bold());
+}
+
+/// Print an aligned key-value row with 2-space indent.
+#[allow(clippy::print_stdout)]
+pub fn kv(key: &str, value: impl std::fmt::Display) {
+    println!("  {key:<20}{value}");
+}
+
+/// Print a dimmed placeholder line.
+#[allow(clippy::print_stdout)]
+pub fn empty(msg: &str) {
+    println!("  {}", msg.dimmed());
+}
 
 /// Format a unix epoch timestamp as a human-readable UTC string.
 pub fn format_epoch(epoch: u64) -> String {
