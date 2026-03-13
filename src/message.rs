@@ -23,14 +23,7 @@ pub fn scrub_value(
         "system" | "file-history-snapshot" => Vec::new(),
         "user" => scrub_user_message(value, pattern_set, entropy_cfg, al, bl),
         "assistant" => scrub_assistant_message(value, pattern_set, entropy_cfg, al, bl),
-        "progress" => scrub_at_path(
-            value,
-            &["data", "message", "message", "content"],
-            pattern_set,
-            entropy_cfg,
-            al,
-            bl,
-        ),
+        "progress" => scrub_at_path(value, &["data"], pattern_set, entropy_cfg, al, bl),
         "queue-operation" => scrub_at_path(value, &["content"], pattern_set, entropy_cfg, al, bl),
         _ => {
             // Unknown type — recursively scrub all strings as a safety net
