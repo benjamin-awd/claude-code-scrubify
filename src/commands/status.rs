@@ -135,32 +135,45 @@ fn run_status_inner() -> Result<()> {
         Err(e) => println!("  Allowlist:   {RED}error: {e}{RESET}"),
     }
 
-    println!();
-    println!("{BOLD}Coverage{RESET}");
-
-    let projects_dir = claude_dir.join("projects");
-    if projects_dir.exists() {
-        let mut total_files: u64 = 0;
-        let mut total_bytes: u64 = 0;
-        for entry in WalkDir::new(&projects_dir)
-            .into_iter()
-            .filter_map(std::result::Result::ok)
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-        {
-            total_files += 1;
-            if let Ok(meta) = entry.metadata() {
-                total_bytes += meta.len();
-            }
-        }
-
-        println!("  History files: {total_files}");
-        println!("  Total size:    {}", display::format_bytes(total_bytes));
-    } else {
-        println!("  {DIM}No projects directory found (~/.claude/projects/){RESET}");
-    }
-
     let persistent = stats::load().unwrap_or_default();
 
+    // --- Recent Redactions ---
+    println!();
+    println!("{BOLD}Recent Redactions{RESET}");
+    let redaction_runs: Vec<&stats::HookRunStats> = persistent
+        .hook_history
+        .iter()
+        .filter(|r| r.redactions > 0)
+        .collect();
+    if redaction_runs.is_empty() {
+        println!("  {DIM}No redactions recorded yet{RESET}");
+    } else {
+        // Show most recent first, up to 3
+        for run in redaction_runs.iter().rev().take(3) {
+            let short_file = std::path::Path::new(&run.file)
+                .file_name()
+                .map_or(run.file.as_str(), |f| f.to_str().unwrap_or(&run.file));
+            let label = if run.redactions == 1 {
+                "redaction"
+            } else {
+                "redactions"
+            };
+            println!(
+                "  {DIM}{}{RESET}  {RED}{}{RESET} {label}  {DIM}[...]/{short_file}{RESET}",
+                display::format_epoch(run.timestamp_epoch),
+                run.redactions,
+            );
+        }
+        if redaction_runs.len() > 3 {
+            let remaining = redaction_runs.len() - 3;
+            println!(
+                "  {DIM}… and {remaining} more (of {} total runs with redactions){RESET}",
+                redaction_runs.len()
+            );
+        }
+    }
+
+    // --- Stats ---
     println!();
     println!("{BOLD}Stats{RESET}");
     if let Some(ref hook) = persistent.last_hook {
@@ -206,6 +219,7 @@ fn run_status_inner() -> Result<()> {
         println!("  {DIM}No hook runs recorded yet{RESET}");
     }
 
+    // --- Last Scan Run ---
     println!();
     println!("{BOLD}Last Scan Run{RESET}");
     if let Some(ref scan) = persistent.last_scan {
@@ -246,6 +260,31 @@ fn run_status_inner() -> Result<()> {
         }
     } else {
         println!("  {DIM}No scan runs recorded yet{RESET}");
+    }
+
+    // --- Coverage ---
+    println!();
+    println!("{BOLD}Coverage{RESET}");
+
+    let projects_dir = claude_dir.join("projects");
+    if projects_dir.exists() {
+        let mut total_files: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        for entry in WalkDir::new(&projects_dir)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+        {
+            total_files += 1;
+            if let Ok(meta) = entry.metadata() {
+                total_bytes += meta.len();
+            }
+        }
+
+        println!("  History files: {total_files}");
+        println!("  Total size:    {}", display::format_bytes(total_bytes));
+    } else {
+        println!("  {DIM}No projects directory found (~/.claude/projects/){RESET}");
     }
 
     println!();
