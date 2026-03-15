@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0](https://github.com/benjamin-awd/claude-code-scrubify/compare/scrub-history-v0.3.0...scrub-history-v0.4.0) (2026-03-15)
+
+
+### Features
+
+* add configurable min_string_length for blacklist entries ([3c0b3e6](https://github.com/benjamin-awd/claude-code-scrubify/commit/3c0b3e6523122b401caebc5fa3faa0aab88bcb01))
+* add Recent Redactions section to status and reorder layout ([75994b7](https://github.com/benjamin-awd/claude-code-scrubify/commit/75994b7a1e33dae1edf3e9ea7ce05c335ceea1bb))
+* scrub subagent transcripts in stop hook ([3454c4c](https://github.com/benjamin-awd/claude-code-scrubify/commit/3454c4cc14b697da0c17123481afade06fcdfa17))
+
+
+### Bug Fixes
+
+* correct subagent discovery path in stop hook ([3534bf4](https://github.com/benjamin-awd/claude-code-scrubify/commit/3534bf42e4138b738d1c151e47ea742bfdf1b36a))
+* scrub all strings in progress message data field ([c8f3e8c](https://github.com/benjamin-awd/claude-code-scrubify/commit/c8f3e8c5a8e826af438f1cbc7db5363412ed2d52))
+* scrub toolUseResult in user messages ([af09734](https://github.com/benjamin-awd/claude-code-scrubify/commit/af097342108ce3ac848fd781a095fe5c691afb7e))
+
 ## [0.3.0](https://github.com/benjamin-awd/claude-code-scrubify/compare/scrub-history-v0.2.0...scrub-history-v0.3.0) (2026-03-12)
 
 
