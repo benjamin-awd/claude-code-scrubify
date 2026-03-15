@@ -77,23 +77,7 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
         .exclude_patterns
         .extend(settings.entropy_exclude_patterns);
 
-    // Collect all files to scrub: the main transcript + any subagent transcripts
-    let mut files_to_scrub = vec![canonical.clone()];
-
-    // Look for subagent JSONL files in the same session directory
-    if let Some(session_dir) = canonical.parent() {
-        let subagents_dir = session_dir.join("subagents");
-        if subagents_dir.is_dir()
-            && let Ok(entries) = std::fs::read_dir(&subagents_dir)
-        {
-            for entry in entries.filter_map(Result::ok) {
-                let p = entry.path();
-                if p.extension().is_some_and(|ext| ext == "jsonl") {
-                    files_to_scrub.push(p);
-                }
-            }
-        }
-    }
+    let files_to_scrub = collect_files_to_scrub(&canonical);
 
     let mut persistent = stats::load().ok();
 
@@ -153,4 +137,114 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Collect the main transcript and any subagent JSONL files for scrubbing.
+///
+/// Claude Code stores subagents at `{project}/{conversation-id}/subagents/*.jsonl`
+/// where the conversation transcript is `{project}/{conversation-id}.jsonl`.
+fn collect_files_to_scrub(transcript: &std::path::Path) -> Vec<PathBuf> {
+    let mut files = vec![transcript.to_path_buf()];
+
+    if let Some(parent_dir) = transcript.parent()
+        && let Some(stem) = transcript.file_stem()
+    {
+        let subagents_dir = parent_dir.join(stem).join("subagents");
+        if subagents_dir.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&subagents_dir)
+        {
+            for entry in entries.filter_map(Result::ok) {
+                let p = entry.path();
+                if p.extension().is_some_and(|ext| ext == "jsonl") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+
+    files
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn collect_files_finds_subagents_in_session_subdirectory() {
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        // Create: {project}/abc-123.jsonl
+        let transcript = project_dir.join("abc-123.jsonl");
+        fs::write(&transcript, "{}").unwrap();
+
+        // Create: {project}/abc-123/subagents/agent-x.jsonl
+        let subagents_dir = project_dir.join("abc-123").join("subagents");
+        fs::create_dir_all(&subagents_dir).unwrap();
+        let agent_file = subagents_dir.join("agent-x.jsonl");
+        fs::write(&agent_file, "{}").unwrap();
+        let agent_file2 = subagents_dir.join("agent-y.jsonl");
+        fs::write(&agent_file2, "{}").unwrap();
+
+        let files = collect_files_to_scrub(&transcript);
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0], transcript);
+        let mut subagent_files: Vec<_> = files[1..].to_vec();
+        subagent_files.sort();
+        assert_eq!(subagent_files[0], agent_file);
+        assert_eq!(subagent_files[1], agent_file2);
+    }
+
+    #[test]
+    fn collect_files_ignores_non_jsonl_in_subagents() {
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let transcript = project_dir.join("abc-123.jsonl");
+        fs::write(&transcript, "{}").unwrap();
+
+        let subagents_dir = project_dir.join("abc-123").join("subagents");
+        fs::create_dir_all(&subagents_dir).unwrap();
+        fs::write(subagents_dir.join("agent-x.jsonl"), "{}").unwrap();
+        fs::write(subagents_dir.join("notes.txt"), "{}").unwrap();
+
+        let files = collect_files_to_scrub(&transcript);
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn collect_files_works_without_subagents_dir() {
+        let tmp = TempDir::new().unwrap();
+        let transcript = tmp.path().join("abc-123.jsonl");
+        fs::write(&transcript, "{}").unwrap();
+
+        let files = collect_files_to_scrub(&transcript);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], transcript);
+    }
+
+    #[test]
+    fn collect_files_does_not_use_parent_subagents_dir() {
+        // Regression: the old code looked at {parent}/subagents/ instead of
+        // {parent}/{stem}/subagents/, which would never find the right files.
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        let transcript = project_dir.join("abc-123.jsonl");
+        fs::write(&transcript, "{}").unwrap();
+
+        // Create a WRONG-location subagents dir at {project}/subagents/
+        let wrong_dir = project_dir.join("subagents");
+        fs::create_dir_all(&wrong_dir).unwrap();
+        fs::write(wrong_dir.join("agent-wrong.jsonl"), "{}").unwrap();
+
+        let files = collect_files_to_scrub(&transcript);
+        // Should NOT pick up agent-wrong.jsonl from the wrong directory
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], transcript);
+    }
 }
