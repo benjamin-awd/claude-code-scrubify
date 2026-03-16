@@ -1,8 +1,9 @@
 use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use bytecount;
 use serde_json::Value;
 use tempfile::NamedTempFile;
 use tracing::warn;
@@ -23,6 +24,8 @@ pub struct ScrubResult {
     #[cfg_attr(not(test), allow(dead_code))]
     pub lines_modified: usize,
     pub diffs: Vec<LineDiff>,
+    /// File size after scrub — used as the `skip_bytes` offset for the next incremental run.
+    pub final_size: u64,
 }
 
 pub fn scrub_jsonl_file(
@@ -32,19 +35,107 @@ pub fn scrub_jsonl_file(
     allowlist: &Allowlist,
     blacklist: &Blacklist,
     dry_run: bool,
+    skip_bytes: Option<u64>,
 ) -> Result<ScrubResult> {
-    let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let reader = BufReader::new(file);
+    let file_meta = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let file_size = file_meta.len();
+
+    // Incremental fast paths
+    if let Some(offset) = skip_bytes {
+        if file_size == offset {
+            // Nothing appended since last scrub — fastest path
+            return Ok(ScrubResult {
+                redactions: Vec::new(),
+                lines_modified: 0,
+                diffs: Vec::new(),
+                final_size: offset,
+            });
+        }
+        if file_size < offset {
+            // File was truncated/replaced — fall back to full scan
+            warn!(
+                file = %path.display(),
+                file_size,
+                offset,
+                "file smaller than recorded offset, performing full scan"
+            );
+            return scrub_jsonl_file_inner(
+                path,
+                pattern_set,
+                entropy_cfg,
+                allowlist,
+                blacklist,
+                dry_run,
+                None,
+                file_size,
+            );
+        }
+        // file_size > offset — incremental scan
+        return scrub_jsonl_file_inner(
+            path,
+            pattern_set,
+            entropy_cfg,
+            allowlist,
+            blacklist,
+            dry_run,
+            Some(offset),
+            file_size,
+        );
+    }
+
+    scrub_jsonl_file_inner(
+        path,
+        pattern_set,
+        entropy_cfg,
+        allowlist,
+        blacklist,
+        dry_run,
+        None,
+        file_size,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scrub_jsonl_file_inner(
+    path: &Path,
+    pattern_set: &PatternSet,
+    entropy_cfg: &EntropyConfig,
+    allowlist: &Allowlist,
+    blacklist: &Blacklist,
+    dry_run: bool,
+    skip_bytes: Option<u64>,
+    file_size: u64,
+) -> Result<ScrubResult> {
+    let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
 
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut temp = NamedTempFile::new_in(dir).context("creating temp file")?;
     let mut writer = BufWriter::new(&mut temp);
 
+    // If incremental, raw-copy the already-scrubbed prefix, then process only the tail.
+    let line_number_offset = if let Some(offset) = skip_bytes {
+        // Copy prefix bytes verbatim
+        let mut prefix_reader = (&mut file).take(offset);
+        io::copy(&mut prefix_reader, &mut writer)?;
+        // Count lines in prefix so line numbers in diffs remain correct
+        writer.flush()?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut prefix_for_count = (&mut file).take(offset);
+        let line_count = count_lines(&mut prefix_for_count)?;
+        // Seek back to the offset to start processing new lines
+        file.seek(SeekFrom::Start(offset))?;
+        line_count
+    } else {
+        0
+    };
+
+    let reader = BufReader::new(file);
+
     let mut all_redactions: Vec<Redaction> = Vec::new();
     let mut lines_modified = 0;
     let mut diffs: Vec<LineDiff> = Vec::new();
     for (line_number, line_result) in reader.lines().enumerate() {
-        let line_number = line_number + 1;
+        let line_number = line_number_offset + line_number + 1;
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
@@ -105,16 +196,34 @@ pub fn scrub_jsonl_file(
     writer.flush()?;
     drop(writer);
 
-    if !dry_run && !all_redactions.is_empty() {
+    let final_size = if !dry_run && !all_redactions.is_empty() {
         temp.persist(path)
             .with_context(|| format!("persisting {}", path.display()))?;
-    }
+        fs::metadata(path)?.len()
+    } else {
+        file_size
+    };
 
     Ok(ScrubResult {
         redactions: all_redactions,
         lines_modified,
         diffs,
+        final_size,
     })
+}
+
+/// Count newlines in a reader without allocating per-line strings.
+fn count_lines(reader: &mut impl Read) -> Result<usize> {
+    let mut buf = [0u8; 8192];
+    let mut count = 0;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        count += bytecount::count(&buf[..n], b'\n');
+    }
+    Ok(count)
 }
 
 /// Message types that `message::scrub_value` skips entirely.
@@ -156,7 +265,7 @@ mod tests {
         let file = make_test_file(&format!("{line}\n"));
         let (ps, ec, al, bl) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None).unwrap();
         assert_eq!(result.lines_modified, 1);
         assert!(!result.redactions.is_empty());
 
@@ -172,7 +281,7 @@ mod tests {
         let file = make_test_file(&original);
         let (ps, ec, al, bl) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, true).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, true, None).unwrap();
         assert!(!result.redactions.is_empty());
 
         let content = fs::read_to_string(file.path()).unwrap();
@@ -200,7 +309,7 @@ mod tests {
         let file = make_test_file(lines);
         let (ps, ec, al, bl) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, true).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, true, None).unwrap();
         assert_eq!(result.diffs.len(), 2);
         assert_eq!(result.diffs[0].line_number, 2);
         assert_eq!(result.diffs[1].line_number, 4);
@@ -212,7 +321,7 @@ mod tests {
         let file = make_test_file(&format!("{line}\n"));
         let (ps, ec, al, bl) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None).unwrap();
         assert!(!result.redactions.is_empty());
         assert!(
             result.diffs.is_empty(),
@@ -226,7 +335,7 @@ mod tests {
         let file = make_test_file(content);
         let (ps, ec, al, bl) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false);
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None);
         assert!(result.is_ok());
     }
 
@@ -236,7 +345,7 @@ mod tests {
         let file = make_test_file(&format!("{line}\n"));
         let (ps, ec, al, bl) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None).unwrap();
         assert!(result.redactions.is_empty());
     }
 
@@ -246,7 +355,7 @@ mod tests {
         let file = make_test_file(&format!("{line}\n"));
         let (ps, ec, al, bl) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None).unwrap();
         assert!(!result.redactions.is_empty());
 
         let content = fs::read_to_string(file.path()).unwrap();
@@ -261,7 +370,7 @@ mod tests {
         let file = make_test_file(&format!("{line}\n"));
         let (ps, ec, al, bl) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None).unwrap();
         assert!(!result.redactions.is_empty());
 
         let content = fs::read_to_string(file.path()).unwrap();
@@ -280,7 +389,7 @@ mod tests {
         let file = make_test_file(&format!("{line}\n"));
         let (ps, ec, al, bl) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, true).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, true, None).unwrap();
         // Both occurrences are redacted in the file
         assert_eq!(result.lines_modified, 1);
         // But deduplicated: same pattern + same matched_text = 1 redaction
@@ -303,7 +412,7 @@ mod tests {
         let file = make_test_file(&format!("{line}\n"));
         let (ps, ec, al, bl) = test_fixtures();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None).unwrap();
         assert!(
             result.redactions.is_empty(),
             "short values under sensitive keys should not be redacted"
@@ -328,7 +437,7 @@ mod tests {
         };
         let al = Allowlist::empty();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None).unwrap();
         assert!(
             !result.redactions.is_empty(),
             "blacklist entry should be redacted"
@@ -352,9 +461,100 @@ mod tests {
         };
         let al = Allowlist::empty();
 
-        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, true).unwrap();
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, true, None).unwrap();
         assert_eq!(result.lines_modified, 1);
         assert_eq!(result.redactions.len(), 1);
         assert_eq!(result.redactions[0].pattern_name, "blacklist");
+    }
+
+    // --- Incremental processing tests ---
+
+    #[test]
+    fn incremental_early_return_unchanged() {
+        let line = r#"{"type":"user","message":{"content":"hello world"}}"#;
+        let file = make_test_file(&format!("{line}\n"));
+        let (ps, ec, al, bl) = test_fixtures();
+
+        let file_size = fs::metadata(file.path()).unwrap().len();
+        let result =
+            scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, Some(file_size)).unwrap();
+
+        assert!(result.redactions.is_empty());
+        assert_eq!(result.lines_modified, 0);
+        assert_eq!(result.final_size, file_size);
+    }
+
+    #[test]
+    fn incremental_skips_prefix() {
+        let clean_line = r#"{"type":"user","message":{"content":"hello world"}}"#;
+        let secret_line = r#"{"type":"user","message":{"content":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
+
+        // Write clean content first
+        let file = make_test_file(&format!("{clean_line}\n"));
+        let offset = fs::metadata(file.path()).unwrap().len();
+
+        // Append a line with a secret
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(file.path())
+                .unwrap();
+            writeln!(f, "{secret_line}").unwrap();
+        }
+
+        let (ps, ec, al, bl) = test_fixtures();
+        let result =
+            scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, Some(offset)).unwrap();
+
+        assert_eq!(result.lines_modified, 1);
+        assert!(!result.redactions.is_empty());
+
+        let content = fs::read_to_string(file.path()).unwrap();
+        assert!(content.contains("[REDACTED:github-token]"));
+        // The clean prefix line should still be present
+        assert!(content.contains("hello world"));
+    }
+
+    #[test]
+    fn incremental_truncated_falls_back() {
+        let line = r#"{"type":"user","message":{"content":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
+        let file = make_test_file(&format!("{line}\n"));
+        let (ps, ec, al, bl) = test_fixtures();
+
+        // Pass an offset larger than the file — should fall back to full scan
+        let result =
+            scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, Some(999_999)).unwrap();
+
+        assert!(!result.redactions.is_empty());
+        let content = fs::read_to_string(file.path()).unwrap();
+        assert!(content.contains("[REDACTED:github-token]"));
+    }
+
+    #[test]
+    fn incremental_copies_prefix_exactly() {
+        let clean_line = r#"{"type":"user","message":{"content":"hello world"}}"#;
+        let secret_line = r#"{"type":"user","message":{"content":"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"}}"#;
+
+        let file = make_test_file(&format!("{clean_line}\n"));
+        let prefix_bytes = fs::read(file.path()).unwrap();
+        let offset = prefix_bytes.len() as u64;
+
+        // Append secret line
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(file.path())
+                .unwrap();
+            writeln!(f, "{secret_line}").unwrap();
+        }
+
+        let (ps, ec, al, bl) = test_fixtures();
+        scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, Some(offset)).unwrap();
+
+        let output = fs::read(file.path()).unwrap();
+        // First N bytes should be identical to the original prefix
+        assert_eq!(&output[..prefix_bytes.len()], &prefix_bytes[..]);
     }
 }

@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use scrub_history::allowlist;
+use scrub_history::cache;
 use scrub_history::entropy::EntropyConfig;
+use scrub_history::hook_state;
 use scrub_history::jsonl;
 use scrub_history::patterns::PatternSet;
 use scrub_history::stats;
@@ -79,9 +81,15 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
 
     let files_to_scrub = collect_files_to_scrub(&canonical);
 
+    let fingerprint = cache::compute_config_fingerprint(entropy_cfg.enabled, entropy_cfg.threshold);
+    let mut hook_state = hook_state::load(&fingerprint);
+
     let mut persistent = stats::load().ok();
 
     for file in &files_to_scrub {
+        let file_key = file.display().to_string();
+        let skip_bytes = hook_state.file_offsets.get(&file_key).copied();
+
         let start = Instant::now();
         let result = match jsonl::scrub_jsonl_file(
             file,
@@ -90,6 +98,7 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
             &allowlist,
             &blacklist,
             false,
+            skip_bytes,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -97,6 +106,10 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
                 continue;
             }
         };
+        hook_state
+            .file_offsets
+            .insert(file_key.clone(), result.final_size);
+
         #[allow(clippy::cast_possible_truncation)]
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -128,6 +141,11 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
                 file_size_bytes,
             });
         }
+    }
+
+    hook_state.config_fingerprint = fingerprint;
+    if let Err(e) = hook_state::save(&hook_state) {
+        warn!(error = %e, "failed to persist hook state");
     }
 
     if let Some(ref persistent) = persistent

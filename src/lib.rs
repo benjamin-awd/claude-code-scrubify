@@ -2,6 +2,7 @@ pub mod allowlist;
 pub mod cache;
 pub mod display;
 pub mod entropy;
+pub mod hook_state;
 pub mod jsonl;
 pub mod message;
 pub mod patterns;

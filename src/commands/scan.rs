@@ -121,6 +121,7 @@ pub(crate) fn run_scan(
             &allowlist,
             &blacklist,
             dry_run,
+            None,
         ) {
             Ok(result) => {
                 if !result.redactions.is_empty() {

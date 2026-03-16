@@ -83,6 +83,7 @@ fn bench_scrub_jsonl(c: &mut Criterion) {
                     &allowlist,
                     &blacklist,
                     false,
+                    None,
                 )
                 .unwrap();
             },
@@ -106,6 +107,53 @@ fn bench_scrub_jsonl(c: &mut Criterion) {
                     &allowlist,
                     &blacklist,
                     false,
+                    None,
+                )
+                .unwrap();
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    // Incremental: pre-scrub 2000 lines, record offset, append 2 new lines
+    let corpus_2000_for_incr = build_corpus(2000);
+    let two_new_lines = build_corpus(2); // 2 lines to append
+
+    group.bench_function("2000_lines_incremental_2_new", |b| {
+        b.iter_batched(
+            || {
+                let mut f = tempfile::NamedTempFile::new().unwrap();
+                f.write_all(corpus_2000_for_incr.as_bytes()).unwrap();
+                f.flush().unwrap();
+                // Pre-scrub to establish baseline
+                let result = scrub_jsonl_file(
+                    f.path(),
+                    &pattern_set,
+                    &entropy_cfg,
+                    &allowlist,
+                    &blacklist,
+                    false,
+                    None,
+                )
+                .unwrap();
+                let offset = result.final_size;
+                // Append 2 new lines
+                {
+                    use std::fs::OpenOptions;
+                    let mut file = OpenOptions::new().append(true).open(f.path()).unwrap();
+                    file.write_all(two_new_lines.as_bytes()).unwrap();
+                }
+                (f, offset)
+            },
+            |(f, offset)| {
+                scrub_jsonl_file(
+                    f.path(),
+                    &pattern_set,
+                    &entropy_cfg,
+                    &allowlist,
+                    &blacklist,
+                    false,
+                    Some(offset),
                 )
                 .unwrap();
             },
@@ -144,6 +192,7 @@ fn bench_hook_latency_gate(c: &mut Criterion) {
                     &allowlist,
                     &blacklist,
                     false,
+                    None,
                 )
                 .unwrap();
             },
