@@ -38,11 +38,11 @@ enum Command {
     Init,
     /// Scan all JSONL files under ~/.claude/projects/
     Scan {
-        /// Preview redactions without modifying files
+        /// Apply redactions to files (default: preview only)
         #[arg(long)]
-        dry_run: bool,
+        fix: bool,
 
-        /// Show full secret values in dry-run output (no truncation)
+        /// Show full secret values in output (no truncation)
         #[arg(long)]
         no_truncate: bool,
 
@@ -89,10 +89,10 @@ fn main() {
         Command::Init => commands::init::run_init(),
         Command::Hook => commands::hook::run_hook(&entropy_cfg),
         Command::Scan {
-            dry_run,
+            fix,
             no_truncate,
             no_cache,
-        } => commands::scan::run_scan(dry_run, no_truncate, no_cache, &entropy_cfg),
+        } => commands::scan::run_scan(fix, no_truncate, no_cache, &entropy_cfg),
         Command::Status => commands::status::run_status(),
     }
 }

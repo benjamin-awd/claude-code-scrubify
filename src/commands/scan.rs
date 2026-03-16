@@ -16,12 +16,8 @@ use scrub_history::stats;
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
-pub(crate) fn run_scan(
-    dry_run: bool,
-    no_truncate: bool,
-    no_cache: bool,
-    entropy_cfg: &EntropyConfig,
-) {
+pub(crate) fn run_scan(fix: bool, no_truncate: bool, no_cache: bool, entropy_cfg: &EntropyConfig) {
+    let dry_run = !fix;
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         error!("HOME not set");
         return;
