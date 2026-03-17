@@ -363,6 +363,53 @@ mod tests {
     }
 
     #[test]
+    fn preserves_base64_image_in_user_message() {
+        // Simulate a user message with an image content block containing base64 data.
+        // The base64 data has high entropy and matches TOKEN_RE, so without the
+        // image-block skip it would be corrupted by the entropy detector.
+        let base64_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let line = format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"text","text":"here is a screenshot"}},{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{base64_data}"}}}}]}}}}"#,
+        );
+        let file = make_test_file(&format!("{line}\n"));
+        let ps = PatternSet::load(true).unwrap();
+        let ec = EntropyConfig::default(); // entropy enabled
+        let al = Allowlist::empty();
+        let bl = Blacklist::empty();
+
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None).unwrap();
+
+        let content = fs::read_to_string(file.path()).unwrap();
+        assert!(
+            content.contains(base64_data),
+            "base64 image data should be preserved, got: {content}"
+        );
+        assert!(result.redactions.is_empty());
+    }
+
+    #[test]
+    fn preserves_base64_image_in_assistant_message() {
+        let base64_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"here is the image"}},{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{base64_data}"}}}}]}}}}"#,
+        );
+        let file = make_test_file(&format!("{line}\n"));
+        let ps = PatternSet::load(true).unwrap();
+        let ec = EntropyConfig::default(); // entropy enabled
+        let al = Allowlist::empty();
+        let bl = Blacklist::empty();
+
+        let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None).unwrap();
+
+        let content = fs::read_to_string(file.path()).unwrap();
+        assert!(
+            content.contains(base64_data),
+            "base64 image data should be preserved, got: {content}"
+        );
+        assert!(result.redactions.is_empty());
+    }
+
+    #[test]
     fn redacts_sensitive_field_by_key_name() {
         // The value doesn't match any regex pattern, but the key "password" triggers redaction
         let line =

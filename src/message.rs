@@ -39,7 +39,32 @@ fn scrub_user_message(
     al: &Allowlist,
     bl: &Blacklist,
 ) -> Vec<Redaction> {
-    let mut redactions = scrub_at_path(value, &["message", "content"], ps, ec, al, bl);
+    let mut redactions = Vec::new();
+
+    if let Some(content) = value.get_mut("message").and_then(|m| m.get_mut("content")) {
+        match content {
+            // Content can be a plain string
+            Value::String(text) => {
+                let (scrubbed, r) = scrub_text(text, ps, ec, al, bl);
+                if !r.is_empty() {
+                    *text = scrubbed;
+                    redactions.extend(r);
+                }
+            }
+            // Or an array of content blocks — skip image blocks to preserve base64 data
+            Value::Array(arr) => {
+                for item in arr.iter_mut() {
+                    if is_image_block(item) {
+                        continue;
+                    }
+                    redactions.extend(scrub_all_strings(item, ps, ec, al, bl));
+                }
+            }
+            other => {
+                redactions.extend(scrub_all_strings(other, ps, ec, al, bl));
+            }
+        }
+    }
 
     // toolUseResult contains stdout/stderr from tool executions
     if let Some(tool_result) = value.get_mut("toolUseResult") {
@@ -65,6 +90,11 @@ fn scrub_assistant_message(
         .and_then(|c| c.as_array_mut())
     {
         for item in content_array.iter_mut() {
+            // Skip image blocks to preserve base64 data
+            if is_image_block(item) {
+                continue;
+            }
+
             // .text field
             if let Some(Value::String(text)) = item.get_mut("text") {
                 let (scrubbed, r) = scrub_text(text, ps, ec, al, bl);
@@ -96,6 +126,14 @@ fn scrub_assistant_message(
     }
 
     redactions
+}
+
+/// Returns `true` if the content block is an image (base64 or URL).
+/// Image blocks contain binary data that must not be scrubbed.
+fn is_image_block(item: &Value) -> bool {
+    item.get("type")
+        .and_then(|t| t.as_str())
+        .is_some_and(|t| t == "image")
 }
 
 fn scrub_at_path(
