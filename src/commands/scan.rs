@@ -16,7 +16,25 @@ use scrub_history::stats;
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
-pub(crate) fn run_scan(fix: bool, no_truncate: bool, no_cache: bool, entropy_cfg: &EntropyConfig) {
+pub(crate) fn run_scan(
+    fix: bool,
+    no_truncate: bool,
+    no_cache: bool,
+    jobs: Option<usize>,
+    entropy_cfg: &EntropyConfig,
+) {
+    let num_threads = jobs.unwrap_or_else(|| {
+        (std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(4)
+            / 2)
+        .max(1)
+    });
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build_global()
+        .ok(); // may fail if already initialized, that's fine
+    info!(threads = num_threads, "thread pool configured");
     let dry_run = !fix;
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         error!("HOME not set");

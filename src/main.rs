@@ -49,6 +49,10 @@ enum Command {
         /// Disable mtime-based cache, force full rescan
         #[arg(long)]
         no_cache: bool,
+
+        /// Max parallel threads (default: half of available cores)
+        #[arg(short, long)]
+        jobs: Option<usize>,
     },
     /// Show hook config, last run stats, coverage, and performance info
     Status,
@@ -92,7 +96,8 @@ fn main() {
             fix,
             no_truncate,
             no_cache,
-        } => commands::scan::run_scan(fix, no_truncate, no_cache, &entropy_cfg),
+            jobs,
+        } => commands::scan::run_scan(fix, no_truncate, no_cache, jobs, &entropy_cfg),
         Command::Status => commands::status::run_status(),
     }
 }
