@@ -232,8 +232,12 @@ const SKIP_PREFIXES: &[&str] = &[r#""type":"system""#, r#""type":"file-history-s
 
 fn is_skippable_message_type(line: &str) -> bool {
     // Only inspect the first 60 bytes — the "type" field is always near the start.
-    let prefix = &line[..line.len().min(60)];
-    SKIP_PREFIXES.iter().any(|p| prefix.contains(p))
+    // Matched over bytes, not `&str`: the cut-off can land mid-UTF-8-sequence
+    // (slicing a `&str` there panics), and every skip prefix is ASCII anyway.
+    let prefix = &line.as_bytes()[..line.len().min(60)];
+    SKIP_PREFIXES
+        .iter()
+        .any(|p| prefix.windows(p.len()).any(|w| w == p.as_bytes()))
 }
 
 #[cfg(test)]
@@ -347,6 +351,18 @@ mod tests {
 
         let result = scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, None).unwrap();
         assert!(result.redactions.is_empty());
+    }
+
+    #[test]
+    fn handles_multibyte_char_across_prefix_cutoff() {
+        // The 60-byte prefix cut-off lands inside the 3-byte '─' here.
+        let line =
+            r#"{"type":"last-prompt","lastPrompt":"remove this      # ── Failure alerting ──"}"#;
+        assert!(
+            !line.is_char_boundary(60),
+            "fixture must straddle the cut-off"
+        );
+        assert!(!is_skippable_message_type(line));
     }
 
     #[test]
