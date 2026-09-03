@@ -361,8 +361,8 @@ mod tests {
             &[
                 r#"password = "short""#,
                 "password reset link",
-                r#"password: "${CLICKHOUSE_CLOUD_KEY_SECRET}""#, // variable ref
-                r#"password = "${DB_PASSWORD}""#,                // variable ref
+                r#"password: "${CLOUD_KEY_SECRET}""#, // variable ref
+                r#"password = "${DB_PASSWORD}""#,     // variable ref
             ],
         );
     }
@@ -408,10 +408,10 @@ mod tests {
             &[
                 "sk-short",
                 "xx-abcdefghijklmnopqrstuvwx",
-                "sk-deploy-confd-flowdesk-0-0",    // K8s resource name
-                "sk-output-waiting-1771554457934", // Claude Code internal ID
+                "sk-deploy-confd-example-0-0",      // K8s resource name
+                "sk-output-waiting-1771554457934",  // Claude Code internal ID
                 "sk-pv-claim-sink-connector-light", // K8s PVC
-                "sk-ant-abcdefghijklmnopqrst",     // anthropic key, not openai
+                "sk-ant-abcdefghijklmnopqrst",      // anthropic key, not openai
             ],
         );
     }

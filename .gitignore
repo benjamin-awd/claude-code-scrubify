@@ -1,1 +1,5 @@
 /target
+
+# Machine-local Claude Code state
+.claude/settings.local.json
+.claude/plans/
