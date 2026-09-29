@@ -66,8 +66,17 @@ enum Command {
         #[arg(long, value_enum, value_delimiter = ',')]
         skip: Vec<Location>,
     },
-    /// Show hook config, last run stats, coverage, and performance info
-    Status,
+    /// Show hook health, config, recent redactions and performance.
+    /// Pass a section for more detail.
+    Status {
+        /// Show one detail view instead of the overview
+        #[arg(value_enum)]
+        section: Option<commands::status::StatusSection>,
+
+        /// Show the overview plus every detail view
+        #[arg(long, conflicts_with = "section")]
+        all: bool,
+    },
 }
 
 fn main() {
@@ -121,6 +130,6 @@ fn main() {
             },
             &entropy_cfg,
         ),
-        Command::Status => commands::status::run_status(),
+        Command::Status { section, all } => commands::status::run_status(section, all),
     }
 }

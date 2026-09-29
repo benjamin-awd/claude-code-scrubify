@@ -20,7 +20,10 @@ Claude Code stores conversation transcripts as JSONL files under `~/.claude/proj
 ## Status dashboard
 
 ```
-scrub-history status
+scrub-history status          # hooks, config, recent redactions, perf, last scan, anything needing attention
+scrub-history status hooks    # per-event hook install state and mode
+scrub-history status scan     # per-location breakdown of the last scan and on-disk coverage
+scrub-history status --all    # everything
 ```
 
 <img src="docs/status.png" alt="scrub-history status output" width="500">
