@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::sync::LazyLock;
 
@@ -254,13 +255,15 @@ fn hex_val(b: u8) -> Option<u8> {
         .and_then(|d| u8::try_from(d).ok())
 }
 
-pub fn scrub_text(
-    text: &str,
+/// Redact secrets in `text`. Returns the input borrowed when nothing was
+/// redacted, so clean strings (the vast majority) are never copied.
+pub fn scrub_text<'a>(
+    text: &'a str,
     pattern_set: &PatternSet,
     entropy_cfg: &EntropyConfig,
     allowlist: &Allowlist,
     blacklist: &Blacklist,
-) -> (String, Vec<Redaction>) {
+) -> (Cow<'a, str>, Vec<Redaction>) {
     // One RegexSet pass tells us which patterns matched; a separate is_match()
     // for the bail-out would scan the text twice.
     let matching_indices: Vec<_> = pattern_set.quick_check.matches(text).into_iter().collect();
@@ -273,7 +276,7 @@ pub fn scrub_text(
         && !blacklist.contains_any(text)
         && !has_percent
     {
-        return (text.to_string(), Vec::new());
+        return (Cow::Borrowed(text), Vec::new());
     }
 
     let mut spans = collect_pattern_and_entropy_spans(
@@ -334,7 +337,7 @@ pub fn scrub_text(
     }
 
     if spans.is_empty() {
-        return (text.to_string(), Vec::new());
+        return (Cow::Borrowed(text), Vec::new());
     }
 
     // Sort by start offset
@@ -386,7 +389,7 @@ pub fn scrub_text(
         result.push_str(&text[pos..]);
     }
 
-    (result, redactions)
+    (Cow::Owned(result), redactions)
 }
 
 /// `dbPassword` / `X-Api-Key` / `client.secret` → `db_password` /
@@ -483,7 +486,7 @@ fn scrub_all_strings_inner(
                 return vec![redaction];
             }
             let (scrubbed, redactions) = scrub_text(s, ps, ec, al, bl);
-            if !redactions.is_empty() {
+            if let Cow::Owned(scrubbed) = scrubbed {
                 *s = scrubbed;
             }
             redactions
@@ -849,6 +852,7 @@ mod tests {
             &no_blacklist(),
         )
         .0
+        .into_owned()
     }
 
     fn scrub_entropy(input: &str) -> String {
@@ -860,6 +864,7 @@ mod tests {
             &no_blacklist(),
         )
         .0
+        .into_owned()
     }
 
     fn assert_redacted(input: &str, secret: &str) {

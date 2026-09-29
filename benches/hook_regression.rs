@@ -31,6 +31,12 @@ fn clean_text() -> (Fixture, String) {
     (Fixture::new(), common::text_chunk())
 }
 
+/// Real transcripts are full of `→`, `—`, emoji…; non-ASCII text is what
+/// used to push the pattern `RegexSet` off its lazy DFA.
+fn non_ascii_text() -> (Fixture, String) {
+    (Fixture::new(), common::text_chunk().replace('\n', " →\n"))
+}
+
 fn secret_text() -> (Fixture, String) {
     let (fx, mut text) = clean_text();
     text.push_str(&common::secret_line());
@@ -40,6 +46,7 @@ fn secret_text() -> (Fixture, String) {
 // The dominant case: text with nothing to redact.
 #[library_benchmark]
 #[bench::clean(setup = clean_text)]
+#[bench::non_ascii(setup = non_ascii_text)]
 #[bench::with_secret(setup = secret_text)]
 fn scrub_text_chunk((fx, text): (Fixture, String)) -> usize {
     let (out, redactions) = scrub_text(

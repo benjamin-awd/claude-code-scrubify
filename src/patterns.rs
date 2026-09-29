@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use anyhow::{Context, Result};
 use regex::{Regex, RegexSet};
 
@@ -46,13 +48,18 @@ impl PatternSet {
 
     pub fn load(skip_custom: bool) -> Result<Self> {
         let mut patterns = built_in_patterns()?;
+        let builtin_count = patterns.len();
 
         if !skip_custom {
             let settings = crate::allowlist::load_config()?;
             patterns.extend(compile_custom_patterns(settings.custom_patterns));
         }
 
-        let raw: Vec<&str> = patterns.iter().map(|p| p.regex.as_str()).collect();
+        let raw: Vec<Cow<'_, str>> = patterns
+            .iter()
+            .enumerate()
+            .map(|(i, p)| prefilter_source(p, i < builtin_count))
+            .collect();
         let quick_check = RegexSet::new(&raw).context("compiling pattern set")?;
 
         let mut seen = std::collections::HashSet::new();
@@ -68,6 +75,63 @@ impl PatternSet {
             all_keywords,
         })
     }
+}
+
+/// Built-in patterns containing `\b`. Each one was checked to only put `\b`
+/// next to ASCII-only atoms (no `(?i)` `k`/`s`, which also fold to `K`/`ſ`),
+/// so [`prefilter_source`] may swap in an ASCII `\b`. Adding a `\b` to another
+/// built-in fails `ascii_word_boundary_patterns_are_reviewed` until checked.
+const ASCII_WORD_BOUNDARY_PATTERNS: &[&str] = &[
+    "gcs-hmac-access-id",
+    "url-userinfo",
+    "env-credential",
+    "netrc-password",
+    "mysql-cli-password",
+    "curl-user-password",
+    "basic-auth-header",
+    "bearer-token",
+    "kubeconfig-credential",
+];
+
+/// Regex source for the `quick_check` pre-filter.
+///
+/// A Unicode `\b` makes the lazy DFA give up on any non-ASCII haystack, so the
+/// whole `RegexSet` falls back to the (much slower) `PikeVM`. The set only has
+/// to be a superset of the per-pattern regexes, which keep their `\b` and
+/// decide the exact spans:
+/// - reviewed built-ins get an ASCII `\b`: next to an ASCII word char, a
+///   Unicode boundary is always an ASCII one too;
+/// - anything else (custom patterns) has `\b` dropped, since removing a
+///   zero-width assertion can only add matches.
+///
+/// `\\b` (escaped backslash) and `\b{start}`-style boundaries are left as is.
+fn prefilter_source(pattern: &SecretPattern, builtin: bool) -> Cow<'_, str> {
+    let source = pattern.regex.as_str();
+    if !source.contains(r"\b") {
+        return Cow::Borrowed(source);
+    }
+    let replacement = if builtin && ASCII_WORD_BOUNDARY_PATTERNS.contains(&pattern.name.as_str()) {
+        r"(?-u:\b)"
+    } else {
+        ""
+    };
+    let mut out = String::with_capacity(source.len() + 16);
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('b') if chars.peek() != Some(&'{') => out.push_str(replacement),
+            Some(next) => {
+                out.push('\\');
+                out.push(next);
+            }
+            None => out.push('\\'),
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Stable hash of the built-in pattern definitions (name, regex, keywords,
@@ -391,7 +455,7 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
         // https://user:pass@…) — capture group 1 is the password.
         (
             "url-userinfo",
-            r#"(?i)\b[a-z][a-z0-9+.-]*://[^:/\s@'"]*:([^@\s/?#'"]+)@"#,
+            r#"(?i)\b(?-i:[a-zA-Z])[a-z0-9+.-]*://[^:/\s@'"]*:([^@\s/?#'"]+)@"#,
             &["://"],
             Some(1),
         ),
@@ -1156,6 +1220,76 @@ mod tests {
         let fp = built_in_fingerprint();
         assert_eq!(fp.len(), 64);
         assert_eq!(fp, built_in_fingerprint());
+    }
+
+    #[test]
+    fn ascii_word_boundary_patterns_are_reviewed() {
+        let mut with_boundary: Vec<String> = built_in_patterns()
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.regex.as_str().contains(r"\b"))
+            .map(|p| p.name)
+            .collect();
+        with_boundary.sort();
+        let mut reviewed: Vec<&str> = ASCII_WORD_BOUNDARY_PATTERNS.to_vec();
+        reviewed.sort_unstable();
+        assert_eq!(with_boundary, reviewed);
+    }
+
+    #[test]
+    fn prefilter_source_rewrites_word_boundaries() {
+        let pat = |name: &str, re: &str| SecretPattern {
+            name: name.to_string(),
+            regex: Regex::new(re).unwrap(),
+            keywords: Vec::new(),
+            secret_group: None,
+        };
+        let reviewed = pat("bearer-token", r"\bfoo\b");
+        assert_eq!(prefilter_source(&reviewed, true), r"(?-u:\b)foo(?-u:\b)");
+        // Same name from a custom pattern is not trusted.
+        assert_eq!(prefilter_source(&reviewed, false), "foo");
+        let custom = pat("custom", r"a\\b\b{start}c\bd");
+        assert_eq!(prefilter_source(&custom, false), r"a\\b\b{start}cd");
+        let plain = pat("custom", r"ghp_\w+");
+        assert!(matches!(prefilter_source(&plain, false), Cow::Borrowed(_)));
+    }
+
+    /// The pre-filter must never skip a pattern whose own regex matches, even
+    /// with non-ASCII word characters (é, 日, Kelvin sign) around a `\b`.
+    #[test]
+    fn prefilter_is_superset_next_to_non_ascii() {
+        let ps = PatternSet::load(true).unwrap();
+        // Built at runtime so push protection doesn't flag a fake GCS key ID.
+        let gcs_id = format!("GOOG{}", "ABCDEFGHIJKLMNOPQRST");
+        let samples = [
+            gcs_id.as_str(),
+            "postgres://user:hunter2hunter2@db",
+            "\u{212A}://user:hunter2hunter2@db",
+            "DB_PASSWORD=hunter2hunter2",
+            "machine example.com login me password hunter2hunter2",
+            "mysql -u root -phunter2hunter2",
+            "curl -u me:hunter2hunter2 https://x",
+            "Authorization: Basic dXNlcjpodW50ZXIy",
+            "Bearer abcdefghijklmnopqrstuvwxyz012345",
+            "refresh-token: abcdefghijklmnopqrstuvwxyz",
+        ];
+        for sample in samples {
+            for (pre, post) in [
+                ("", ""),
+                ("é", "é"),
+                ("日", "日"),
+                ("\u{212A}", "ſ"),
+                ("-", "-"),
+            ] {
+                let text = format!("{pre}{sample}{post}");
+                let hits = ps.quick_check.matches(&text);
+                for (i, p) in ps.patterns.iter().enumerate() {
+                    if p.regex.is_match(&text) {
+                        assert!(hits.matched(i), "pre-filter skipped {} on {text:?}", p.name);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
