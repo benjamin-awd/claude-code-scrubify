@@ -1,0 +1,43 @@
+# cargo-deny configuration. Run locally with `cargo deny check`.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Fail on any RustSec vulnerability or unsoundness advisory (the default in
+# cargo-deny >= 0.16), and on dependencies that have been yanked.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Allowlist derived from `cargo metadata --format-version 1 | jq '.packages[].license'`.
+# Only licenses actually needed to satisfy the dependency tree are listed.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "MPL-2.0",     # colored
+    "Unicode-3.0", # unicode-ident
+]
+confidence-threshold = 0.93
+
+# The crate itself is AGPL-3.0. That license is intentionally not in the
+# global allowlist (a copyleft dependency should be a conscious decision),
+# so it is allowed for this crate only. Cargo.toml has no `license` field, so
+# cargo-deny infers it from the LICENSE file text (reported as
+# AGPL-3.0-or-later); both SPDX forms are accepted.
+[[licenses.exceptions]]
+crate = "scrub-history"
+allow = ["AGPL-3.0-only", "AGPL-3.0-or-later"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path/workspace crates are not wildcards in the security-relevant sense.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

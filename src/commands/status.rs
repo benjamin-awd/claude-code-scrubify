@@ -1,14 +1,17 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use colored::Colorize;
-use scrub_history::allowlist;
+use scrub_history::allowlist::{self, ScrubberSettings};
 use scrub_history::display;
+use scrub_history::fsutil;
 use scrub_history::locations::{self, Location};
 use scrub_history::patterns::PatternSet;
 use scrub_history::stats;
+
+use super::init::{HOOK_EVENTS, find_installed_hook, hook_command_is_absolute};
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 pub(crate) fn run_status() {
@@ -35,72 +38,17 @@ fn run_status_inner() -> Result<()> {
     display::section("Hook Configuration");
 
     let settings_path = claude_dir.join("settings.json");
-    if settings_path.exists() {
-        let data = std::fs::read_to_string(&settings_path)?;
-        let root: serde_json::Value = serde_json::from_str(&data)?;
-        let hook_entry = root
-            .get("hooks")
-            .and_then(|h| h.get("Stop"))
-            .and_then(|s| s.as_array())
-            .and_then(|arr| {
-                arr.iter().find(|entry| {
-                    entry
-                        .get("hooks")
-                        .and_then(|h| h.as_array())
-                        .is_some_and(|hooks| {
-                            hooks.iter().any(|h| {
-                                h.get("command").and_then(serde_json::Value::as_str)
-                                    == Some("scrub-history hook")
-                            })
-                        })
-                })
-            });
-        if let Some(entry) = hook_entry {
-            let is_async = entry
-                .get("hooks")
-                .and_then(|h| h.as_array())
-                .and_then(|hooks| hooks.first())
-                .and_then(|h| h.get("async"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let mode = if is_async { "async" } else { "sync" };
-            display::kv("Stop hook", format!("{} ({mode})", "installed".green()));
-        } else {
-            display::kv(
-                "Stop hook",
-                format!(
-                    "{}  {}",
-                    "not installed".red(),
-                    "(run `scrub-history init`)".dimmed()
-                ),
-            );
-        }
-    } else {
-        display::kv(
-            "Stop hook",
-            format!(
-                "{}  {}",
-                "not installed".red(),
-                "(run `scrub-history init`)".dimmed()
-            ),
-        );
+    for (key, value) in hook_report(&settings_path) {
+        display::kv(&key, value);
     }
 
     // ── Config ──────────────────────────────────────
     display::section("Config");
 
     let config_path = claude_dir.join("scrubber.toml");
-    if config_path.exists() {
-        display::kv("scrubber.toml", "present".green());
-    } else {
-        display::kv(
-            "scrubber.toml",
-            format!(
-                "{}  {}",
-                "absent".yellow(),
-                "(run `scrub-history init`)".dimmed()
-            ),
-        );
+    let settings = allowlist::load_config_from(&config_path);
+    for (key, value) in config_report(&config_path, &settings) {
+        display::kv(&key, value);
     }
 
     // ── Detection ───────────────────────────────────
@@ -133,35 +81,30 @@ fn run_status_inner() -> Result<()> {
         ),
     }
 
-    match allowlist::load_config() {
-        Ok(settings) => {
-            let count = settings.allowlist.len();
-            if count > 0 {
-                display::kv(
-                    "Allowlist",
-                    format!("{count} hash{}", if count == 1 { "" } else { "es" }),
-                );
-            } else {
-                display::kv("Allowlist", "empty".dimmed());
-            }
-            let ep_count = settings.entropy_exclude_patterns.len();
-            if ep_count > 0 {
-                display::kv(
-                    "Entropy exclusions",
-                    format!("{ep_count} pattern{}", if ep_count == 1 { "" } else { "s" }),
-                );
-            }
-            let bl_count = settings.blacklist.len();
-            if bl_count > 0 {
-                display::kv(
-                    "Blacklist",
-                    format!("{bl_count} entr{}", if bl_count == 1 { "y" } else { "ies" }),
-                );
-            } else {
-                display::kv("Blacklist", "empty".dimmed());
-            }
-        }
-        Err(e) => display::kv("Allowlist", format!("{}", format!("error: {e}").red())),
+    let count = settings.allowlist.len();
+    if count > 0 {
+        display::kv(
+            "Allowlist",
+            format!("{count} hash{}", if count == 1 { "" } else { "es" }),
+        );
+    } else {
+        display::kv("Allowlist", "empty".dimmed());
+    }
+    let ep_count = settings.entropy_exclude_patterns.len();
+    if ep_count > 0 {
+        display::kv(
+            "Entropy exclusions",
+            format!("{ep_count} pattern{}", if ep_count == 1 { "" } else { "s" }),
+        );
+    }
+    let bl_count = settings.blacklist.len();
+    if bl_count > 0 {
+        display::kv(
+            "Blacklist",
+            format!("{bl_count} entr{}", if bl_count == 1 { "y" } else { "ies" }),
+        );
+    } else {
+        display::kv("Blacklist", "empty".dimmed());
     }
 
     let persistent = stats::load().unwrap_or_default();
@@ -378,4 +321,194 @@ fn run_status_inner() -> Result<()> {
 
     println!();
     Ok(())
+}
+
+fn not_installed() -> String {
+    format!(
+        "{}  {}",
+        "not installed".red(),
+        "(run `scrub-history init`)".dimmed()
+    )
+}
+
+/// Per-event hook status rows for the dashboard.
+fn hook_report(settings_path: &Path) -> Vec<(String, String)> {
+    let root: Option<serde_json::Value> = match std::fs::read_to_string(settings_path) {
+        Ok(data) => match serde_json::from_str(&data) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                return vec![(
+                    "settings.json".into(),
+                    format!("could not parse: {e}").red().to_string(),
+                )];
+            }
+        },
+        Err(_) => None,
+    };
+    let mut rows = Vec::new();
+    for &event in HOOK_EVENTS {
+        let key = format!("{event} hook");
+        let Some(hook) = root.as_ref().and_then(|r| find_installed_hook(r, event)) else {
+            rows.push((key, not_installed()));
+            continue;
+        };
+        let mode = if hook.is_async { "async" } else { "sync" };
+        rows.push((key, format!("{} ({mode})", "installed".green())));
+        if !hook_command_is_absolute(&hook.command) {
+            rows.push((
+                String::new(),
+                format!(
+                    "{}  {}",
+                    "WARNING: command is resolved via PATH (another binary could hijack it)"
+                        .yellow(),
+                    "(re-run `scrub-history init`)".dimmed()
+                ),
+            ));
+        }
+    }
+    rows
+}
+
+/// Config file status rows: presence, permissions, load errors and skipped
+/// custom patterns.
+fn config_report(config_path: &Path, settings: &ScrubberSettings) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    if config_path.exists() {
+        rows.push(("scrubber.toml".into(), "present".green().to_string()));
+        if fsutil::is_group_or_world_readable(config_path) {
+            let mode = fsutil::file_mode(config_path).unwrap_or_default();
+            rows.push((
+                "Permissions".into(),
+                format!(
+                    "{}  {}",
+                    format!(
+                        "WARNING: {mode:o} is readable by other users (holds blacklist secrets)"
+                    )
+                    .red(),
+                    format!("(chmod 600 {})", config_path.display()).dimmed()
+                ),
+            ));
+        }
+    } else {
+        rows.push((
+            "scrubber.toml".into(),
+            format!(
+                "{}  {}",
+                "absent".yellow(),
+                "(run `scrub-history init`)".dimmed()
+            ),
+        ));
+    }
+    for err in &settings.config_errors {
+        rows.push(("Config error".into(), err.red().to_string()));
+    }
+    if settings
+        .config_errors
+        .iter()
+        .any(|e| e.contains("TOML syntax error") || e.contains("could not read"))
+    {
+        rows.push((
+            String::new(),
+            "using built-in patterns and defaults only; blacklist, allowlist and custom \
+             patterns are NOT applied"
+                .red()
+                .bold()
+                .to_string(),
+        ));
+    }
+    for c in &settings.custom_patterns {
+        if let Err(reason) = allowlist::compile_custom_pattern(c) {
+            rows.push((
+                "Skipped pattern".into(),
+                format!("'{}': {reason}", c.name).yellow().to_string(),
+            ));
+        }
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn joined(rows: &[(String, String)]) -> String {
+        rows.iter()
+            .map(|(k, v)| format!("{k}: {v}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn hook_report_warns_on_path_resolved_command() {
+        colored::control::set_override(false);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks": {"Stop": [{"matcher": "", "hooks": [
+                {"type": "command", "command": "scrub-history hook"}]}],
+              "SessionEnd": [{"matcher": "", "hooks": [
+                {"type": "command", "command": "'/opt/bin/scrub-history' hook"}]}]}}"#,
+        )
+        .unwrap();
+        let text = joined(&hook_report(&path));
+        assert!(text.contains("Stop hook: installed (sync)"), "{text}");
+        assert!(text.contains("resolved via PATH"), "{text}");
+        assert_eq!(text.matches("resolved via PATH").count(), 1, "{text}");
+        assert!(text.contains("SessionEnd hook: installed"), "{text}");
+        assert!(text.contains("SubagentStop hook: not installed"), "{text}");
+    }
+
+    #[test]
+    fn hook_report_missing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = hook_report(&dir.path().join("settings.json"));
+        assert_eq!(rows.len(), HOOK_EVENTS.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_report_warns_when_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        colored::control::set_override(false);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scrubber.toml");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let settings = allowlist::load_config_from(&path);
+        let text = joined(&config_report(&path, &settings));
+        assert!(text.contains("readable by other users"), "{text}");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let text = joined(&config_report(&path, &settings));
+        assert!(!text.contains("readable by other users"), "{text}");
+    }
+
+    #[test]
+    fn config_report_shows_parse_errors_and_skipped_patterns() {
+        colored::control::set_override(false);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scrubber.toml");
+
+        std::fs::write(&path, "[blacklist\nstrings = [\"sekrit-value-123\"]\n").unwrap();
+        let settings = allowlist::load_config_from(&path);
+        let text = joined(&config_report(&path, &settings));
+        assert!(text.contains("TOML syntax error"), "{text}");
+        assert!(text.contains("NOT applied"), "{text}");
+        assert!(!text.contains("sekrit"), "{text}");
+
+        std::fs::write(
+            &path,
+            "[[patterns]]\nname = \"bad\"\nregex = \"sekrit(\"\n\n[[patterns]]\nname = \"ok\"\nregex = \"ok_[a-z]{8}\"\n",
+        )
+        .unwrap();
+        let settings = allowlist::load_config_from(&path);
+        let text = joined(&config_report(&path, &settings));
+        assert!(
+            text.contains("Skipped pattern: 'bad': invalid regex syntax"),
+            "{text}"
+        );
+        assert!(!text.contains("'ok'"), "{text}");
+        assert!(!text.contains("sekrit"), "{text}");
+    }
 }
