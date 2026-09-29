@@ -247,11 +247,7 @@ fn report_config_files(
 
 pub(crate) fn run_scan(opts: &ScanOptions, entropy_cfg: &EntropyConfig) {
     let num_threads = opts.jobs.unwrap_or_else(|| {
-        (std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(4)
-            / 2)
-        .max(1)
+        (std::thread::available_parallelism().map_or(4, std::num::NonZero::get) / 2).max(1)
     });
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)

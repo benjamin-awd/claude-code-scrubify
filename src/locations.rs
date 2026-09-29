@@ -22,7 +22,7 @@ use crate::scrubber::scrub_all_strings;
 
 /// Orphaned temp files younger than this are left alone: they may belong to a
 /// rewrite that is still in flight (e.g. a concurrent hook run).
-pub const ORPHAN_MIN_AGE: Duration = Duration::from_secs(60 * 60);
+pub const ORPHAN_MIN_AGE: Duration = Duration::from_hours(1);
 
 /// A place where Claude Code stores content that may contain secrets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, clap::ValueEnum)]

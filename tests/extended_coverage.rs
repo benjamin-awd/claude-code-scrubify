@@ -544,11 +544,11 @@ fn orphan_cleanup_respects_age_and_naming() {
     for p in [&old, &fresh, &top, &not_ours, &fh_old] {
         write(p, format!(r#"{{"k":"{GH_TOKEN}"}}"#));
     }
-    set_age(&old, Duration::from_secs(2 * 3600));
-    set_age(&top, Duration::from_secs(2 * 3600));
-    set_age(&not_ours, Duration::from_secs(2 * 3600));
-    set_age(&fh_old, Duration::from_secs(90 * 60));
-    set_age(&fresh, Duration::from_secs(10 * 60));
+    set_age(&old, Duration::from_hours(2));
+    set_age(&top, Duration::from_hours(2));
+    set_age(&not_ours, Duration::from_hours(2));
+    set_age(&fh_old, Duration::from_mins(90));
+    set_age(&fresh, Duration::from_mins(10));
 
     let now = SystemTime::now();
     let d = discover(&t, &LocationSet::all());
@@ -585,13 +585,13 @@ fn orphan_removal_ignores_symlinks_and_recent_files() {
     let tmp = tempfile::tempdir().unwrap();
     let target = tmp.path().join("real");
     fs::write(&target, "x").unwrap();
-    set_age(&target, Duration::from_secs(3 * 3600));
+    set_age(&target, Duration::from_hours(3));
     let link = tmp.path().join(".tmpLnk123");
     symlink(&target, &link).unwrap();
 
     let orphan = Orphan {
         path: link.clone(),
-        age: Some(Duration::from_secs(3 * 3600)),
+        age: Some(Duration::from_hours(3)),
     };
     assert!(!locations::remove_stale_orphan(&orphan, SystemTime::now()).unwrap());
     assert!(link.exists() && target.exists());
@@ -601,7 +601,7 @@ fn orphan_removal_ignores_symlinks_and_recent_files() {
     fs::write(&recent, "x").unwrap();
     let orphan = Orphan {
         path: recent.clone(),
-        age: Some(Duration::from_secs(3 * 3600)),
+        age: Some(Duration::from_hours(3)),
     };
     assert!(!locations::remove_stale_orphan(&orphan, SystemTime::now()).unwrap());
     assert!(recent.exists());

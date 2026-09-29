@@ -125,7 +125,7 @@ fn run_hook_inner(entropy_cfg: &EntropyConfig) -> anyhow::Result<()> {
         }
 
         if let Some(ref mut persistent) = persistent {
-            let file_size_bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+            let file_size_bytes = std::fs::metadata(file).map_or(0, |m| m.len());
             persistent.push_hook_run(stats::HookRunStats {
                 timestamp_epoch: stats::now_epoch(),
                 file: file.display().to_string(),
