@@ -70,6 +70,44 @@ impl PatternSet {
     }
 }
 
+/// Stable hash of the built-in pattern definitions (name, regex, keywords,
+/// secret group). Feeds the cache fingerprint so pattern changes force a rescan.
+pub fn built_in_fingerprint() -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    for p in built_in_patterns().unwrap_or_default() {
+        hasher.update(p.name.as_bytes());
+        hasher.update([0]);
+        hasher.update(p.regex.as_str().as_bytes());
+        hasher.update([0]);
+        hasher.update(p.keywords.join(",").as_bytes());
+        hasher.update([0]);
+        hasher.update(format!("{:?}", p.secret_group).as_bytes());
+        hasher.update([0xff]);
+    }
+    crate::allowlist::to_hex(&hasher.finalize())
+}
+
+/// Built-in patterns whose unquoted values may be code rather than a literal
+/// (`password: userPassword`, `TOKEN = settings.TOKEN`). The scrubber skips
+/// identifier-like and path-like values for these.
+pub const LOOSE_VALUE_PATTERNS: &[&str] = &[
+    "env-credential",
+    "config-credential",
+    "bearer-token",
+    "docker-config-auth",
+];
+
+/// Built-in patterns with strong credential context (URL userinfo, CLI flag)
+/// where even short values are real passwords.
+pub const SHORT_VALUE_PATTERNS: &[&str] = &[
+    "url-userinfo",
+    "netrc-password",
+    "mysql-cli-password",
+    "curl-user-password",
+];
+
 /// Compile user-defined patterns. A bad custom pattern must not disable
 /// redaction: it is skipped with a warning (built-ins and the other custom
 /// patterns still load). The warning never includes the regex source, which
@@ -110,6 +148,10 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
     //
     // secret_group: when Some(n), only capture group n is the secret to redact;
     //   the surrounding match is context.  None = redact the entire match.
+    //
+    // Key/value patterns accept `['"\\]*` after the key and `\\?['"`]` before
+    // the value so JSON (`"password": "…"`), JSON inside a JSON string
+    // (`\"password\":\"…\"`) and backtick-quoted values all match.
     let defs: Vec<(&str, &str, &[&str], Option<usize>)> = vec![
         // AWS
         (
@@ -120,8 +162,19 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
         ),
         (
             "aws-secret-key",
-            r#"(?i)(?:aws_secret_access_key|aws_secret_key|secret_access_key)\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?"#,
+            r#"(?i)(?:aws_secret_access_key|aws_secret_key|secret_access_key)['"\\]*\s*[=:]\s*\\?['"`]?([A-Za-z0-9/+=]{40})"#,
             &["aws_secret", "secret_access_key"],
+            Some(1),
+        ),
+        // STS session tokens are several hundred base64 chars
+        (
+            "aws-session-token",
+            r#"(?i)(?:aws_session_token|aws_security_token|x-amz-security-token)['"\\]*\s*[=:]\s*\\?['"`]?([A-Za-z0-9/+=]{100,})"#,
+            &[
+                "aws_session_token",
+                "aws_security_token",
+                "x-amz-security-token",
+            ],
             Some(1),
         ),
         // GitHub
@@ -151,10 +204,23 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
             &["eyj"],
             None,
         ),
-        // Private keys
+        // GCP service-account JSON — capture group 1 is the whole PEM value.
+        // Listed before private-key so the more specific name wins when both
+        // cover the same span. Optional backslashes cover JSON nested inside a
+        // JSON string (e.g. tool inputs).
+        (
+            "gcp-service-account-key",
+            r#"private_key\\?"\s*:\s*\\?"(-----BEGIN PRIVATE KEY-----[^"]*?-----END PRIVATE KEY-----)"#,
+            &["private_key"],
+            Some(1),
+        ),
+        // PEM private keys (PKCS#8, RSA, EC, DSA, OPENSSH, ENCRYPTED, PGP): the
+        // whole block through the END line, across real or literal `\n`
+        // newlines. Without an END line (truncated output) the header plus
+        // the base64 lines that follow it are redacted.
         (
             "private-key",
-            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+            r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----(?:(?s:.*?)-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----|(?:(?:\s|\\[rn])+[A-Za-z0-9+/=]{16,})*)",
             &["private key"],
             None,
         ),
@@ -167,13 +233,6 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
             ],
             None,
         ),
-        // Password assignments — capture group 1 is the value (exclude variable refs)
-        (
-            "password-assignment",
-            r#"(?i)(?:password|passwd|pwd)\s*[=:]\s*['"]([^\s'"$]{8,})['"]"#,
-            &["password", "passwd", "pwd"],
-            Some(1),
-        ),
         // Stripe
         (
             "stripe-key",
@@ -183,11 +242,13 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
             ],
             None,
         ),
-        // Slack
+        // Slack: bot, user, app-config (xoxa/xoxe/xoxo), refresh and legacy tokens
         (
             "slack-token",
-            r"xox[bprs]-[A-Za-z0-9\-]{10,}",
-            &["xoxb-", "xoxp-", "xoxr-", "xoxs-"],
+            r"xox[abeoprs]-[A-Za-z0-9\-]{10,}",
+            &[
+                "xoxa-", "xoxb-", "xoxe-", "xoxo-", "xoxp-", "xoxr-", "xoxs-",
+            ],
             None,
         ),
         (
@@ -203,8 +264,15 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
             &["sk-ant-"],
             None,
         ),
-        // OpenAI (no hyphens after sk- prefix; real keys are alphanumeric only)
+        // OpenAI legacy keys (no hyphens after sk- prefix; alphanumeric only)
         ("openai-key", r"sk-[A-Za-z0-9]{20,}", &["sk-"], None),
+        // OpenAI project / service-account / admin keys
+        (
+            "openai-project-key",
+            r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}",
+            &["sk-proj-", "sk-svcacct-", "sk-admin-"],
+            None,
+        ),
         // Google
         ("google-api-key", r"AIza[A-Za-z0-9\-_]{35}", &["aiza"], None),
         (
@@ -213,21 +281,17 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
             &["gocspx-"],
             Some(1),
         ),
+        // GCS HMAC access IDs: 61 chars for service accounts, 24 for user
+        // accounts (https://cloud.google.com/storage/docs/authentication/hmackeys).
+        // The 40-char secret has no prefix and is left to entropy detection.
+        (
+            "gcs-hmac-access-id",
+            r"\bGOOG(?:[0-9A-Z]{57}|[0-9A-Z]{20})\b",
+            &["goog"],
+            None,
+        ),
         // npm
         ("npm-token", r"npm_[A-Za-z0-9]{36}", &["npm_"], None),
-        // Generic API key assignment — capture group 1 is the value
-        (
-            "generic-api-key",
-            r#"(?i)(?:api_key|apikey|api_secret|secret_key|access_token)\s*[=:]\s*['"]([A-Za-z0-9\-_./+=]{20,})['"]"#,
-            &[
-                "api_key",
-                "apikey",
-                "api_secret",
-                "secret_key",
-                "access_token",
-            ],
-            Some(1),
-        ),
         // Heroku — capture group 1 is the UUID value
         (
             "heroku-api-key",
@@ -320,13 +384,135 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
             &[".atlasv1."],
             None,
         ),
-        // GCP service-account JSON — capture group 1 is the whole PEM value, so the
-        // key body is redacted too (private-key only covers the header line).
-        // Optional backslashes cover JSON nested inside a JSON string (e.g. tool inputs).
+        // ---- Generic key/value and CLI context patterns ----
+        // Kept last: on an identical span the scrubber keeps the first
+        // pattern's name, so provider-specific names win over these.
+        // Password in any URL's userinfo (rediss://, postgresql+psycopg2://,
+        // https://user:pass@…) — capture group 1 is the password.
         (
-            "gcp-service-account-key",
-            r#"private_key\\?"\s*:\s*\\?"(-----BEGIN PRIVATE KEY-----[^"]*?-----END PRIVATE KEY-----)"#,
-            &["private_key"],
+            "url-userinfo",
+            r#"(?i)\b[a-z][a-z0-9+.-]*://[^:/\s@'"]*:([^@\s/?#'"]+)@"#,
+            &["://"],
+            Some(1),
+        ),
+        // Password assignments — capture group 1 is the value (exclude variable refs)
+        (
+            "password-assignment",
+            r#"(?i)(?:password|passwd|pwd)['"\\]*\s*[=:]\s*\\?['"`]([^\s'"`$\\][^\s'"`\\]{7,})\\?['"`]"#,
+            &["password", "passwd", "pwd"],
+            Some(1),
+        ),
+        // Upper-case env-style assignments: `export DB_PASSWORD=…`,
+        // `PGPASSWORD=…`, `API_KEY: …`. `\b` after the key word keeps
+        // `TOKEN_TYPE=`, `PASSWORD_MIN_LENGTH=` and `MAX_TOKENS=` out; bare
+        // `PASS`/`PWD` need a prefix so `--- PASS: TestX` and `PWD=/home` don't fire.
+        (
+            "env-credential",
+            r#"\b[A-Z0-9_]*(?:PASSWORD|PASSWD|_PASS|_PWD|SECRET|TOKEN|API_?KEY|(?:SECRET|ACCESS|PRIVATE|SIGNING|ENCRYPTION|MASTER|AUTH)_KEY|CREDENTIALS?)\b\s*[=:]\s*['"]?([^\s'"$\\<>{}()\[\],;`]{8,})"#,
+            &["pass", "pwd", "secret", "token", "key", "credential"],
+            Some(1),
+        ),
+        // Line-anchored YAML / INI / .pypirc / kubeconfig values:
+        // `password: …`, `password = …`, `token: …`, `client_secret: …`.
+        (
+            "config-credential",
+            r#"(?im)^[ \t]*(?:-[ \t]+)?["']?[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key)["']?[ \t]*[:=][ \t]*["']?([^\s'"$\\<>{}()\[\],;`]{8,})["']?(?:[ \t]+#.*)?[ \t]*$"#,
+            &["pass", "secret", "token", "key"],
+            Some(1),
+        ),
+        // ~/.netrc: `machine host login user password secret` (also `default`)
+        (
+            "netrc-password",
+            r"\b(?:machine(?:\s|\\[nt])+[^\s\\]+|default)(?:\s|\\[nt])+login(?:\s|\\[nt])+[^\s\\]+(?:\s|\\[nt])+password(?:\s|\\[nt])+([^\s\\$]+)",
+            &["machine", "default"],
+            Some(1),
+        ),
+        // `mysql -pSECRET` / `--password=SECRET` (a bare `-p` prompts instead)
+        (
+            "mysql-cli-password",
+            r#"\b(?:mysql|mysqldump|mysqladmin|mysqlsh|mariadb)\b[^\n|;&]*?\s(?:-p|--password=)['"]?([^\s'"$<-][^\s'"]*)"#,
+            &["mysql", "mariadb"],
+            Some(1),
+        ),
+        // `curl -u user:pass` / `curl --user user:pass`
+        (
+            "curl-user-password",
+            r#"\bcurl\b[^\n|;&]*?\s(?:-u|--user)(?:\s+|=)['"]?[^\s:'"]+:([^\s'"$<][^\s'"]*)"#,
+            &["curl"],
+            Some(1),
+        ),
+        // HTTP auth headers
+        (
+            "basic-auth-header",
+            r#"(?i)\bauthorization\\?["']?\s*[:=]\s*\\?["']?basic\s+([A-Za-z0-9+/]{8,}={0,2})"#,
+            &["basic"],
+            Some(1),
+        ),
+        (
+            "bearer-token",
+            r"(?i)\bbearer\s+([A-Za-z0-9\-._~+/]{16,}=*)",
+            &["bearer"],
+            Some(1),
+        ),
+        // Kubernetes Secret manifests (`kubectl get secret -o yaml|json`): the
+        // whole `data:` / `stringData:` block. Only runs when the text says
+        // `kind: Secret`, so ConfigMaps and other `data:` maps are untouched.
+        (
+            "k8s-secret-data",
+            r"(?m)^[ \t]*(?:-[ \t]+)?(?:data|stringData):[ \t]*\r?\n((?:[ \t]+[\w.-]+:[ \t]*\S[^\n]*)(?:\n[ \t]+[\w.-]+:[ \t]*\S[^\n]*)*)",
+            &["kind: secret"],
+            Some(1),
+        ),
+        (
+            "k8s-secret-data-json",
+            r#"\\?"(?:data|stringData)\\?"\s*:\s*\{((?:\s*\\?"[\w.-]+\\?"\s*:\s*\\?"[^"\\]*\\?"\s*,?)+)\s*\}"#,
+            &[
+                r#""kind": "secret""#,
+                r#""kind":"secret""#,
+                r#"\"kind\": \"secret\""#,
+                r#"\"kind\":\"secret\""#,
+            ],
+            Some(1),
+        ),
+        // Docker config.json / .dockerconfigjson: "auth" is base64(user:pass)
+        (
+            "docker-config-auth",
+            r#"\\?"(?:auth|identitytoken)\\?"\s*:\s*\\?"([A-Za-z0-9+/=._-]{8,})\\?""#,
+            &[r#"auth""#, r#"auth\""#, "identitytoken"],
+            Some(1),
+        ),
+        // base64 of a whole docker config ({"auths": …}), as stored in k8s
+        (
+            "docker-config-b64",
+            r"eyJhdXRocyI6[A-Za-z0-9+/]{20,}={0,2}",
+            &["eyjhdxrocyi6"],
+            None,
+        ),
+        // kubeconfig user credentials (`token:` is covered by config-credential)
+        (
+            "kubeconfig-credential",
+            r#"(?i)\b(?:client-key-data|id-token|refresh-token|access-token)\\?["']?\s*:\s*\\?["']?([A-Za-z0-9+/=._~-]{16,})"#,
+            &[
+                "client-key-data",
+                "id-token",
+                "refresh-token",
+                "access-token",
+            ],
+            Some(1),
+        ),
+        // Generic API key assignment — capture group 1 is the value
+        (
+            "generic-api-key",
+            r#"(?i)(?:api[_-]?key|api_secret|secret_key|access_token|auth_token)['"\\]*\s*[=:]\s*\\?['"`]?([A-Za-z0-9\-_./+=]{20,})\\?['"`]"#,
+            &[
+                "api_key",
+                "apikey",
+                "api-key",
+                "api_secret",
+                "secret_key",
+                "access_token",
+                "auth_token",
+            ],
             Some(1),
         ),
     ];
@@ -521,8 +707,14 @@ mod tests {
     fn slack_token() {
         check(
             "slack-token",
-            &["xoxb-1234567890-abcdefghij", "xoxp-9876543210-1234567890"],
-            &["xoxb-short", "xoxa-1234567890-abcdefghij"],
+            &[
+                "xoxb-1234567890-abcdefghij",
+                "xoxp-9876543210-1234567890",
+                concat!("xoxa-", "2-1234567890-abcdefghij"),
+                concat!("xoxe-", "1-FAKEfakeFAKEfake"),
+                concat!("xoxo-", "1234567890-abcdefghij"),
+            ],
+            &["xoxb-short", "xoxz-1234567890-abcdefghij"],
         );
     }
 
@@ -613,6 +805,26 @@ mod tests {
     const AGE: &str = "AGE-SECRET-KEY-1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE";
     const TERRAFORM: &str =
         "FAKEfakeFAKE00.atlasv1.FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfake";
+    const OPENAI_PROJECT: &str = concat!("sk-proj-", "FAKEfakeFAKEfake_FAKE-fakeFAKEfake");
+    const OPENAI_SVCACCT: &str = concat!("sk-svcacct-", "FAKEfakeFAKEfakeFAKEfake");
+    const OPENAI_ADMIN: &str = concat!("sk-admin-", "FAKEfakeFAKEfakeFAKEfake");
+    const SLACK_CONFIG: &str = concat!("xoxe-", "1-FAKEfakeFAKEfake0123");
+    const SLACK_APP_CONFIG: &str = concat!("xoxa-", "2-FAKEfakeFAKEfake0123");
+    const SLACK_ORG: &str = concat!("xoxo-", "FAKEfakeFAKEfake0123");
+    // GCS HMAC access IDs: 61 chars (service account) and 24 chars (user).
+    const GCS_HMAC_SA: &str = concat!(
+        "GOOG1",
+        "FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE"
+    );
+    const GCS_HMAC_USER: &str = concat!("GOOG", "FAKEFAKEFAKEFAKE0123");
+    // base64 of {"auths":{"fake.example.com":{"auth":"ZmFrZTpmYWtl"}}}
+    const DOCKER_B64: &str =
+        "eyJhdXRocyI6eyJmYWtlLmV4YW1wbGUuY29tIjp7ImF1dGgiOiJabUZyWlRwbVlXdGwifX19";
+    const PEM_RSA: &str = concat!(
+        "-----BEGIN RSA PRIVATE KEY-----\n",
+        "MIIEFAKEfakeFAKEfakeFAKEfake\n",
+        "-----END RSA PRIVATE KEY-----"
+    );
 
     #[test]
     fn grafana_service_account_token() {
@@ -740,6 +952,139 @@ mod tests {
     }
 
     #[test]
+    fn openai_project_key() {
+        check(
+            "openai-project-key",
+            &[OPENAI_PROJECT, OPENAI_SVCACCT, OPENAI_ADMIN],
+            &[
+                "sk-proj-short",
+                "sk-deploy-confd-example-0-0",
+                "sk-pv-claim-sink-connector-light",
+                "sk-output-waiting-1771554457934",
+            ],
+        );
+    }
+
+    #[test]
+    fn gcs_hmac_access_id() {
+        check(
+            "gcs-hmac-access-id",
+            &[GCS_HMAC_SA, GCS_HMAC_USER],
+            &[
+                concat!("GOOG", "FAKEFAKEFAKEFAKEFAKEFAKEFAKE"), // 32: neither length
+                "GOOGLE_APPLICATION_CREDENTIALS",
+            ],
+        );
+    }
+
+    #[test]
+    fn private_key_covers_whole_block() {
+        let pat = built_in_patterns()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.name == "private-key")
+            .unwrap();
+        for block in [
+            PEM_RSA.to_string(),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaFAKE\n-----END OPENSSH PRIVATE KEY-----"
+                .to_string(),
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQFAKE\n-----END PGP PRIVATE KEY BLOCK-----"
+                .to_string(),
+        ] {
+            assert_eq!(pat.regex.find(&block).unwrap().as_str(), block);
+        }
+        assert!(!pat.regex.is_match("-----BEGIN PUBLIC KEY-----"));
+        assert!(!pat.regex.is_match("-----BEGIN CERTIFICATE-----"));
+    }
+
+    #[test]
+    fn url_userinfo() {
+        check(
+            "url-userinfo",
+            &[
+                "rediss://default:FAKEpass@cache:6380",
+                "postgresql+psycopg2://app:FAKEpass@db/app",
+                "https://u:FAKEpass@git.example.com/r.git",
+            ],
+            &[
+                "https://example.com:8443/path",
+                "ssh://git@github.com/org/repo",
+                "git@github.com:org/repo.git",
+            ],
+        );
+    }
+
+    #[test]
+    fn env_credential() {
+        check(
+            "env-credential",
+            &[
+                "export DB_PASSWORD=FAKEpass123",
+                "PGPASSWORD=FAKEpass123",
+                "REDIS_PASS=FAKEpass123",
+                "API_KEY: FAKEpass123",
+                "AWS_SECRET_ACCESS_KEY=FAKEpass123",
+            ],
+            &[
+                "TOKEN_TYPE=bearer",
+                "PASSWORD_MIN_LENGTH=12345678",
+                "MAX_TOKENS=40964096",
+                "export API_KEY=$API_KEY",
+                "API_KEY=${API_KEY}",
+                "--- PASS: TestFooBarBaz",
+                "PWD=/home/someone",
+                "password=lowercase_is_not_env_style",
+            ],
+        );
+    }
+
+    #[test]
+    fn cli_credentials() {
+        check(
+            "mysql-cli-password",
+            &[
+                "mysql -u root -pFAKEpass app",
+                "mysqldump --password=FAKE app",
+            ],
+            &[
+                "mysql -u root -p app",
+                "mysql -p$MYSQL_PWD",
+                "mysql -P 3306 -h db",
+            ],
+        );
+        check(
+            "curl-user-password",
+            &[
+                "curl -u admin:FAKEpass https://x",
+                "curl -s --user=a:FAKEpass x",
+            ],
+            &["curl -u admin https://x", "curl -u $U:$P https://x"],
+        );
+        check(
+            "netrc-password",
+            &[
+                "machine example.com login me password FAKEpass",
+                r"machine example.com\n  login me\n  password FAKEpass",
+                "default login me password FAKEpass",
+            ],
+            &[
+                "log in with your password",
+                "login me password",
+                "machine learning models log in with a password manager",
+            ],
+        );
+    }
+
+    #[test]
+    fn k8s_secret_data() {
+        check(
+            "k8s-secret-data",
+            &["data:\n  password: RkFLRQ==\n  user: RkFLRQ==\n"],
+            &["data: {}\n", "metadata:\n  name: x\n"],
+        );
+    }
+
+    #[test]
     fn new_patterns_do_not_overlap_existing() {
         let patterns = built_in_patterns().unwrap();
         let cases = [
@@ -756,6 +1101,16 @@ mod tests {
             ("pypi-token", TEST_PYPI),
             ("age-secret-key", AGE),
             ("terraform-cloud-token", TERRAFORM),
+            ("openai-project-key", OPENAI_PROJECT),
+            ("openai-project-key", OPENAI_SVCACCT),
+            ("openai-project-key", OPENAI_ADMIN),
+            ("slack-token", SLACK_CONFIG),
+            ("slack-token", SLACK_APP_CONFIG),
+            ("slack-token", SLACK_ORG),
+            ("gcs-hmac-access-id", GCS_HMAC_SA),
+            ("gcs-hmac-access-id", GCS_HMAC_USER),
+            ("docker-config-b64", DOCKER_B64),
+            ("private-key", PEM_RSA),
         ];
         for (expected, vector) in cases {
             let own = patterns.iter().find(|p| p.name == expected).unwrap();
@@ -780,10 +1135,27 @@ mod tests {
                      and DigitalOcean dop_v1_ tokens should be revoked. Upload with a pypi- \
                      token, decrypt with an AGE-SECRET-KEY-1 identity, and log in to \
                      app.terraform.io for an atlasv1 token. Slack xapp-1 tokens enable \
-                     Socket Mode.";
+                     Socket Mode. OpenAI sk-proj- and sk-svcacct- keys, Slack xoxe- \
+                     and xoxa- tokens, GOOG1 HMAC access IDs and aws_session_token values \
+                     must be rotated. Store the password in ~/.netrc or .pypirc, run \
+                     mysql -p and type it at the prompt, or pass curl -u user to be \
+                     prompted. The Authorization header takes Basic or Bearer credentials; \
+                     a kubeconfig holds a token and client-key-data, a kind: Secret keeps \
+                     base64 data, and docker login writes an auth entry. Connection URLs \
+                     like rediss:// and postgresql+psycopg2:// carry a user and password. \
+                     Set TOKEN_TYPE=bearer, PASSWORD_MIN_LENGTH=12 and MAX_TOKENS=4096, then \
+                     export API_KEY=$API_KEY. The password reset link expires; log in with \
+                     your password manager.";
         for p in &patterns {
             assert!(!p.regex.is_match(prose), "{} matched prose", p.name);
         }
+    }
+
+    #[test]
+    fn built_in_fingerprint_is_stable() {
+        let fp = built_in_fingerprint();
+        assert_eq!(fp.len(), 64);
+        assert_eq!(fp, built_in_fingerprint());
     }
 
     #[test]

@@ -3,13 +3,51 @@ use serde_json::Value;
 use crate::allowlist::{Allowlist, Blacklist};
 use crate::entropy::EntropyConfig;
 use crate::patterns::PatternSet;
-use crate::scrubber::{Redaction, scrub_all_strings, scrub_text};
+use crate::scrubber::{Redaction, scrub_all_strings};
 
-/// Route a parsed JSON value through message-type-aware scrubbing.
+/// Top-level transcript fields that are identifiers or structure, never
+/// free text. Leaving them untouched keeps the parent/child chain and
+/// session linkage intact for `claude --resume`.
+const STRUCTURAL_TOP_KEYS: &[&str] = &[
+    "type",
+    "uuid",
+    "parentUuid",
+    "logicalParentUuid",
+    "leafUuid",
+    "sessionId",
+    "requestId",
+    "messageId",
+    "promptId",
+    "toolUseID",
+    "parentToolUseID",
+    "sourceToolAssistantUUID",
+    "timestamp",
+    "version",
+    "userType",
+    "isSidechain",
+    "isMeta",
+];
+
+/// Structural fields of the `message` object (API message envelope).
+const STRUCTURAL_MESSAGE_KEYS: &[&str] = &[
+    "id",
+    "type",
+    "role",
+    "model",
+    "stop_reason",
+    "stop_sequence",
+    "usage",
+];
+
+/// Scrub every free-text field of a transcript line.
 ///
-/// Understands the Claude conversation schema (`type` field) and selectively
-/// scrubs the paths that carry user/assistant content while skipping
-/// system metadata.
+/// Every message type — `user`, `assistant`, `system`, `progress`,
+/// `summary`, `file-history-snapshot` and anything unknown — gets a full
+/// recursive scrub, so content in fields added by future Claude Code
+/// versions is covered by default. Only structural identifiers
+/// (`STRUCTURAL_TOP_KEYS`, `STRUCTURAL_MESSAGE_KEYS`) and opaque blobs
+/// (image data, thinking `signature`, `redacted_thinking.data`; see
+/// `scrubber::scrub_all_strings`) are left untouched.
 pub fn scrub_value(
     value: &mut Value,
     pattern_set: &PatternSet,
@@ -17,146 +55,124 @@ pub fn scrub_value(
     al: &Allowlist,
     bl: &Blacklist,
 ) -> Vec<Redaction> {
-    let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let Value::Object(map) = value else {
+        return scrub_all_strings(value, pattern_set, entropy_cfg, al, bl);
+    };
 
-    match msg_type {
-        "system" | "file-history-snapshot" => Vec::new(),
-        "user" => scrub_user_message(value, pattern_set, entropy_cfg, al, bl),
-        "assistant" => scrub_assistant_message(value, pattern_set, entropy_cfg, al, bl),
-        "progress" => scrub_at_path(value, &["data"], pattern_set, entropy_cfg, al, bl),
-        "queue-operation" => scrub_at_path(value, &["content"], pattern_set, entropy_cfg, al, bl),
-        _ => {
-            // Unknown type — recursively scrub all strings as a safety net
-            scrub_all_strings(value, pattern_set, entropy_cfg, al, bl)
-        }
-    }
-}
-
-fn scrub_user_message(
-    value: &mut Value,
-    ps: &PatternSet,
-    ec: &EntropyConfig,
-    al: &Allowlist,
-    bl: &Blacklist,
-) -> Vec<Redaction> {
     let mut redactions = Vec::new();
-
-    if let Some(content) = value.get_mut("message").and_then(|m| m.get_mut("content")) {
-        match content {
-            // Content can be a plain string
-            Value::String(text) => {
-                let (scrubbed, r) = scrub_text(text, ps, ec, al, bl);
-                if !r.is_empty() {
-                    *text = scrubbed;
-                    redactions.extend(r);
-                }
-            }
-            // Or an array of content blocks — skip image blocks to preserve base64 data
-            Value::Array(arr) => {
-                for item in arr.iter_mut() {
-                    if is_image_block(item) {
-                        continue;
-                    }
-                    redactions.extend(scrub_all_strings(item, ps, ec, al, bl));
-                }
-            }
-            other => {
-                redactions.extend(scrub_all_strings(other, ps, ec, al, bl));
-            }
+    for (key, val) in map.iter_mut() {
+        if STRUCTURAL_TOP_KEYS.contains(&key.as_str()) {
+            continue;
         }
+        if key == "message"
+            && let Value::Object(message) = val
+        {
+            for (mkey, mval) in message.iter_mut() {
+                if STRUCTURAL_MESSAGE_KEYS.contains(&mkey.as_str()) {
+                    continue;
+                }
+                redactions.extend(scrub_all_strings(mval, pattern_set, entropy_cfg, al, bl));
+            }
+            continue;
+        }
+        redactions.extend(scrub_all_strings(val, pattern_set, entropy_cfg, al, bl));
     }
-
-    // toolUseResult contains stdout/stderr from tool executions
-    if let Some(tool_result) = value.get_mut("toolUseResult") {
-        redactions.extend(scrub_all_strings(tool_result, ps, ec, al, bl));
-    }
-
     redactions
 }
 
-fn scrub_assistant_message(
-    value: &mut Value,
-    ps: &PatternSet,
-    ec: &EntropyConfig,
-    al: &Allowlist,
-    bl: &Blacklist,
-) -> Vec<Redaction> {
-    let mut redactions = Vec::new();
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
 
-    // Navigate to .message.content which is an array
-    if let Some(content_array) = value
-        .get_mut("message")
-        .and_then(|m| m.get_mut("content"))
-        .and_then(|c| c.as_array_mut())
-    {
-        for item in content_array.iter_mut() {
-            // Skip image blocks to preserve base64 data
-            if is_image_block(item) {
-                continue;
-            }
+    use super::*;
 
-            // .text field
-            if let Some(Value::String(text)) = item.get_mut("text") {
-                let (scrubbed, r) = scrub_text(text, ps, ec, al, bl);
-                if !r.is_empty() {
-                    *text = scrubbed;
-                    redactions.extend(r);
-                }
-            }
+    // Split with concat! so GitHub push protection doesn't flag the fake literal.
+    const GH: &str = concat!("ghp_", "FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKE");
 
-            // .thinking field
-            if let Some(Value::String(thinking)) = item.get_mut("thinking") {
-                let (scrubbed, r) = scrub_text(thinking, ps, ec, al, bl);
-                if !r.is_empty() {
-                    *thinking = scrubbed;
-                    redactions.extend(r);
-                }
-            }
-
-            // .input (tool_use) — recursively scrub all strings
-            if let Some(input) = item.get_mut("input") {
-                redactions.extend(scrub_all_strings(input, ps, ec, al, bl));
-            }
-
-            // .content (tool_result) — recursively scrub all strings
-            if let Some(content) = item.get_mut("content") {
-                redactions.extend(scrub_all_strings(content, ps, ec, al, bl));
-            }
-        }
+    fn run(value: &mut Value) -> Vec<Redaction> {
+        let ps = PatternSet::load(true).unwrap();
+        scrub_value(
+            value,
+            &ps,
+            &EntropyConfig::default(),
+            &Allowlist::empty(),
+            &Blacklist::empty(),
+        )
     }
 
-    redactions
-}
-
-/// Returns `true` if the content block is an image (base64 or URL).
-/// Image blocks contain binary data that must not be scrubbed.
-fn is_image_block(item: &Value) -> bool {
-    item.get("type")
-        .and_then(|t| t.as_str())
-        .is_some_and(|t| t == "image")
-}
-
-fn scrub_at_path(
-    value: &mut Value,
-    path: &[&str],
-    ps: &PatternSet,
-    ec: &EntropyConfig,
-    al: &Allowlist,
-    bl: &Blacklist,
-) -> Vec<Redaction> {
-    let mut current = value as &mut Value;
-    for &key in &path[..path.len().saturating_sub(1)] {
-        match current.get_mut(key) {
-            Some(v) => current = v,
-            None => return Vec::new(),
-        }
+    #[test]
+    fn system_lines_are_scrubbed() {
+        let mut v = json!({"type": "system", "subtype": "hook", "content": format!("token {GH}")});
+        assert_eq!(run(&mut v).len(), 1);
+        assert_eq!(v["content"], "token [REDACTED:github-token]");
     }
 
-    if let Some(&last_key) = path.last()
-        && let Some(target) = current.get_mut(last_key)
-    {
-        return scrub_all_strings(target, ps, ec, al, bl);
+    #[test]
+    fn assistant_plain_string_content_is_scrubbed() {
+        let mut v = json!({"type": "assistant", "message": {"role": "assistant", "content": GH}});
+        assert_eq!(run(&mut v).len(), 1);
+        assert_eq!(v["message"]["content"], "[REDACTED:github-token]");
     }
 
-    Vec::new()
+    #[test]
+    fn unknown_fields_on_content_items_are_scrubbed() {
+        let mut v = json!({"type": "assistant", "message": {"content": [
+            {"type": "server_tool_use", "query": GH},
+            {"type": "text", "text": "ok", "citations": [{"cited_text": GH}]},
+        ]}});
+        assert_eq!(run(&mut v).len(), 2);
+        let s = v.to_string();
+        assert!(!s.contains("ghp_"), "{s}");
+    }
+
+    #[test]
+    fn user_fields_outside_content_are_scrubbed() {
+        let mut v = json!({
+            "type": "user",
+            "message": {"role": "user", "content": "hi"},
+            "summary": GH,
+            "attachment": {"text": format!("export TOKEN={GH}")},
+        });
+        assert_eq!(run(&mut v).len(), 2);
+        assert!(!v.to_string().contains("ghp_"));
+    }
+
+    #[test]
+    fn progress_and_queue_lines_are_scrubbed_outside_known_paths() {
+        let mut v = json!({"type": "progress", "data": {"output": GH}, "extra": GH});
+        assert_eq!(run(&mut v).len(), 2);
+        let mut v = json!({"type": "queue-operation", "content": GH, "operation": GH});
+        assert_eq!(run(&mut v).len(), 2);
+    }
+
+    #[test]
+    fn structural_ids_and_opaque_blobs_are_untouched() {
+        let sig = "EqQBCkYIBBgCKkBFAKEfakeFAKEfakeFAKEfake0123456789abcdefFAKE";
+        let blob = "EmwKAhgQEgxFAKEfakeFAKEfake0123456789AbCdEfGhIjKlMnOp";
+        let img = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg";
+        let mut v = json!({
+            "type": "assistant",
+            "uuid": "5f0c7b1e-8a3d-4e2f-9b6a-1c2d3e4f5a6b",
+            "requestId": "req_011CFAKEfakeFAKEfake0123",
+            "message": {"id": "msg_01FAKEfakeFAKEfake012345", "model": "claude-x", "content": [
+                {"type": "thinking", "thinking": "hmm", "signature": sig},
+                {"type": "redacted_thinking", "data": blob},
+                {"type": "image", "source": {"type": "base64", "data": img}},
+                {"type": "tool_result", "tool_use_id": "toolu_01FAKEfakeFAKEfake0123",
+                 "content": [{"type": "image", "source": {"type": "base64", "data": img}}]},
+            ]},
+        });
+        let before = v.clone();
+        assert!(run(&mut v).is_empty());
+        assert_eq!(v, before);
+    }
+
+    #[test]
+    fn tool_use_result_image_is_preserved_but_text_scrubbed() {
+        let img = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg";
+        let mut v = json!({"type": "user", "message": {"content": []},
+            "toolUseResult": {"type": "image", "file": {"base64": img}, "stdout": GH}});
+        assert_eq!(run(&mut v).len(), 1);
+        assert_eq!(v["toolUseResult"]["file"]["base64"], img);
+    }
 }
