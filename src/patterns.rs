@@ -222,6 +222,91 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
             &["sg."],
             None,
         ),
+        // Grafana
+        (
+            "grafana-service-account-token",
+            r"glsa_[A-Za-z0-9]{32}_[0-9a-f]{8}",
+            &["glsa_"],
+            None,
+        ),
+        (
+            "grafana-cloud-token",
+            r"glc_[A-Za-z0-9+/=_-]{32,}",
+            &["glc_"],
+            None,
+        ),
+        // Legacy API keys are base64 JSON starting with {"k":" (no dots, so disjoint from jwt)
+        (
+            "grafana-api-key",
+            r"eyJrIjoi[A-Za-z0-9+/=]{30,}",
+            &["eyjrijoi"],
+            None,
+        ),
+        // Slack app-level token: xapp-<version>-<app id>-<numeric id>-<secret>
+        (
+            "slack-app-token",
+            r"(?i)xapp-[0-9]-[A-Z0-9]+-[0-9]+-[a-z0-9]+",
+            &["xapp-"],
+            None,
+        ),
+        // HashiCorp Vault service (hvs.) and batch (hvb.) tokens
+        (
+            "vault-token",
+            r"hv[sb]\.[A-Za-z0-9_-]{24,}",
+            &["hvs.", "hvb."],
+            None,
+        ),
+        // Doppler; service tokens may carry an environment slug (dp.st.<env>.<token>)
+        (
+            "doppler-token",
+            r"dp\.(?:pt|st|sa|ct|scim|audit)\.(?:[a-z0-9_-]+\.)?[A-Za-z0-9]{40,}",
+            &[
+                "dp.pt.",
+                "dp.st.",
+                "dp.sa.",
+                "dp.ct.",
+                "dp.scim.",
+                "dp.audit.",
+            ],
+            None,
+        ),
+        // DigitalOcean personal access, OAuth and refresh tokens
+        (
+            "digitalocean-token",
+            r"do[oprt]_v1_[a-f0-9]{64}",
+            &["dop_v1_", "doo_v1_", "dor_v1_", "dot_v1_"],
+            None,
+        ),
+        // PyPI macaroons: base64 prefix encodes the "pypi.org" / "test.pypi.org" location
+        (
+            "pypi-token",
+            r"pypi-AgE(?:IcHlwaS5vcmc|NdGVzdC5weXBpLm9yZw)[A-Za-z0-9_-]{50,}",
+            &["pypi-age"],
+            None,
+        ),
+        // age: Bech32 payload (uppercase alphabet, no 1/B/I/O)
+        (
+            "age-secret-key",
+            r"AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}",
+            &["age-secret-key-1"],
+            None,
+        ),
+        // Terraform Cloud / Enterprise API token (also in ~/.terraform.d/credentials.tfrc.json)
+        (
+            "terraform-cloud-token",
+            r"[A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9_=-]{60,}",
+            &[".atlasv1."],
+            None,
+        ),
+        // GCP service-account JSON — capture group 1 is the whole PEM value, so the
+        // key body is redacted too (private-key only covers the header line).
+        // Optional backslashes cover JSON nested inside a JSON string (e.g. tool inputs).
+        (
+            "gcp-service-account-key",
+            r#"private_key\\?"\s*:\s*\\?"(-----BEGIN PRIVATE KEY-----[^"]*?-----END PRIVATE KEY-----)"#,
+            &["private_key"],
+            Some(1),
+        ),
     ];
 
     defs.into_iter()
@@ -453,6 +538,199 @@ mod tests {
             &["SG.abcdefghijklmnopqrstuv.wxyzABCDEFGHIJKLMNOPQRS"],
             &["SG.short.short", "XX.abcdefghijklmnopqrstuv.wxyzABCDEF"],
         );
+    }
+
+    // Synthetic vectors: "FAKE"/"fake"/"deadbeef" filler shaped to each format.
+    const GRAFANA_SA: &str = "glsa_FAKEfakeFAKEfakeFAKEfakeFAKEfake_0123abcd";
+    const GRAFANA_CLOUD: &str = "glc_FAKEfakeFAKEfakeFAKEfakeFAKEfake==";
+    const GRAFANA_LEGACY: &str = "eyJrIjoiRkFLRWZha2VGQUtFZmFrZUZBS0VmYWtl";
+    const SLACK_APP: &str = "xapp-1-A0FAKEFAKE0-1234567890123-fakefakefakefake0123456789";
+    const VAULT_SERVICE: &str = "hvs.FAKEfakeFAKEfakeFAKEfake00";
+    const VAULT_BATCH: &str = "hvb.FAKEfakeFAKEfakeFAKEfake_-00";
+    // Split with concat! so GitHub push protection doesn't flag the fake literals.
+    const DOPPLER_PERSONAL: &str = concat!("dp.pt.", "FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfake000");
+    const DOPPLER_SERVICE: &str =
+        concat!("dp.st.dev.", "FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfake000");
+    const DIGITALOCEAN: &str =
+        "dop_v1_deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    const PYPI: &str =
+        "pypi-AgEIcHlwaS5vcmcFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfake";
+    const TEST_PYPI: &str =
+        "pypi-AgENdGVzdC5weXBpLm9yZwFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfake";
+    const AGE: &str = "AGE-SECRET-KEY-1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE";
+    const TERRAFORM: &str =
+        "FAKEfakeFAKE00.atlasv1.FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfake";
+
+    #[test]
+    fn grafana_service_account_token() {
+        check(
+            "grafana-service-account-token",
+            &[GRAFANA_SA, &format!("GRAFANA_TOKEN={GRAFANA_SA}")],
+            &[
+                "glsa_short_0123abcd",
+                "glsa_FAKEfakeFAKEfakeFAKEfakeFAKEfake_ZZZZZZZZ", // non-hex checksum
+            ],
+        );
+    }
+
+    #[test]
+    fn gcp_service_account_key() {
+        check(
+            "gcp-service-account-key",
+            &[
+                r#""private_key": "-----BEGIN PRIVATE KEY-----\nFAKEfakeFAKEfake\n-----END PRIVATE KEY-----\n","#,
+                // JSON embedded in a JSON string (escaped quotes and newlines)
+                r#"\"private_key\":\"-----BEGIN PRIVATE KEY-----\\nFAKEfakeFAKEfake\\n-----END PRIVATE KEY-----\\n\""#,
+            ],
+            &[
+                r#""private_key": "${GCP_PRIVATE_KEY}""#,
+                r#""private_key_id": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef""#,
+            ],
+        );
+    }
+
+    #[test]
+    fn grafana_cloud_token() {
+        check(
+            "grafana-cloud-token",
+            &[GRAFANA_CLOUD],
+            &["glc_short", "glx_FAKEfakeFAKEfakeFAKEfakeFAKEfake=="],
+        );
+    }
+
+    #[test]
+    fn grafana_api_key() {
+        check(
+            "grafana-api-key",
+            &[GRAFANA_LEGACY],
+            &[
+                "eyJrIjoishort",
+                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", // JWT header, not {"k":
+            ],
+        );
+    }
+
+    #[test]
+    fn slack_app_token() {
+        check(
+            "slack-app-token",
+            &[SLACK_APP],
+            &["xapp-1-", "xapp-release-notes"],
+        );
+    }
+
+    #[test]
+    fn vault_token() {
+        check(
+            "vault-token",
+            &[VAULT_SERVICE, VAULT_BATCH],
+            &["hvs.short", "hvx.FAKEfakeFAKEfakeFAKEfake00"],
+        );
+    }
+
+    #[test]
+    fn doppler_token() {
+        check(
+            "doppler-token",
+            &[DOPPLER_PERSONAL, DOPPLER_SERVICE],
+            &[
+                "dp.pt.short",
+                "dp.xx.FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfake000",
+            ],
+        );
+    }
+
+    #[test]
+    fn digitalocean_token() {
+        check(
+            "digitalocean-token",
+            &[DIGITALOCEAN],
+            &[
+                "dop_v1_short",
+                "dop_v2_deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            ],
+        );
+    }
+
+    #[test]
+    fn pypi_token() {
+        check(
+            "pypi-token",
+            &[PYPI, TEST_PYPI],
+            &["pypi-short", "pypi-AgEIcHlwaS5vcmcshort"],
+        );
+    }
+
+    #[test]
+    fn age_secret_key() {
+        check(
+            "age-secret-key",
+            &[AGE],
+            &[
+                "AGE-SECRET-KEY-1SHORT",
+                // 'B' is outside the Bech32 alphabet
+                "AGE-SECRET-KEY-1BPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE",
+            ],
+        );
+    }
+
+    #[test]
+    fn terraform_cloud_token() {
+        check(
+            "terraform-cloud-token",
+            &[TERRAFORM],
+            &[
+                "abc.atlasv1.xyz",
+                "FAKEfakeFAKE00.atlasv2.FAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKEfake",
+            ],
+        );
+    }
+
+    #[test]
+    fn new_patterns_do_not_overlap_existing() {
+        let patterns = built_in_patterns().unwrap();
+        let cases = [
+            ("grafana-service-account-token", GRAFANA_SA),
+            ("grafana-cloud-token", GRAFANA_CLOUD),
+            ("grafana-api-key", GRAFANA_LEGACY),
+            ("slack-app-token", SLACK_APP),
+            ("vault-token", VAULT_SERVICE),
+            ("vault-token", VAULT_BATCH),
+            ("doppler-token", DOPPLER_PERSONAL),
+            ("doppler-token", DOPPLER_SERVICE),
+            ("digitalocean-token", DIGITALOCEAN),
+            ("pypi-token", PYPI),
+            ("pypi-token", TEST_PYPI),
+            ("age-secret-key", AGE),
+            ("terraform-cloud-token", TERRAFORM),
+        ];
+        for (expected, vector) in cases {
+            let own = patterns.iter().find(|p| p.name == expected).unwrap();
+            assert!(
+                own.keyword_hit(&vector.to_lowercase()),
+                "{expected} keywords miss {vector}"
+            );
+            let hits: Vec<_> = patterns
+                .iter()
+                .filter(|p| p.regex.is_match(vector))
+                .map(|p| p.name.as_str())
+                .collect();
+            assert_eq!(hits, [expected], "unexpected matches for {vector}");
+        }
+    }
+
+    #[test]
+    fn prose_mentioning_new_token_types_is_not_matched() {
+        let patterns = built_in_patterns().unwrap();
+        let prose = "Rotate the Grafana service account token (glsa_ prefix) and the glc_ \
+                     cloud token. Vault hvs. and hvb. tokens expire; Doppler dp.pt tokens \
+                     and DigitalOcean dop_v1_ tokens should be revoked. Upload with a pypi- \
+                     token, decrypt with an AGE-SECRET-KEY-1 identity, and log in to \
+                     app.terraform.io for an atlasv1 token. Slack xapp-1 tokens enable \
+                     Socket Mode.";
+        for p in &patterns {
+            assert!(!p.regex.is_match(prose), "{} matched prose", p.name);
+        }
     }
 
     #[test]

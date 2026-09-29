@@ -317,6 +317,37 @@ mod tests {
     }
 
     #[test]
+    fn redacts_grafana_token_with_entropy_enabled() {
+        let ps = test_pattern_set();
+        let input = "export GRAFANA_TOKEN=glsa_FAKEfakeFAKEfakeFAKEfakeFAKEfake_0123abcd";
+        let (result, redactions) = scrub_text(
+            input,
+            &ps,
+            &EntropyConfig::default(),
+            &no_allowlist(),
+            &no_blacklist(),
+        );
+        assert_eq!(
+            result,
+            "export GRAFANA_TOKEN=[REDACTED:grafana-service-account-token]"
+        );
+        assert_eq!(redactions.len(), 1);
+    }
+
+    #[test]
+    fn redacts_whole_gcp_service_account_key() {
+        let ps = test_pattern_set();
+        let input = r#"{"type": "service_account", "private_key": "-----BEGIN PRIVATE KEY-----\nFAKEfakeFAKEfake\n-----END PRIVATE KEY-----\n", "client_email": "fake@fake-project.iam.gserviceaccount.com"}"#;
+        let (result, redactions) =
+            scrub_text(input, &ps, &no_entropy(), &no_allowlist(), &no_blacklist());
+        assert_eq!(
+            result,
+            r#"{"type": "service_account", "private_key": "[REDACTED:gcp-service-account-key]\n", "client_email": "fake@fake-project.iam.gserviceaccount.com"}"#
+        );
+        assert_eq!(redactions.len(), 1);
+    }
+
+    #[test]
     fn redacts_github_token() {
         let ps = test_pattern_set();
         let input = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl";
