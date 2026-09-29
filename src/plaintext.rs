@@ -252,8 +252,7 @@ fn scrub_chunk(
     }
     let mut changed = false;
     let mut out = Vec::with_capacity(chunk.len());
-    let mut line_no = line_base;
-    for line in chunk.split_inclusive(|&b| b == b'\n') {
+    for (line_no, line) in (line_base..).zip(chunk.split_inclusive(|&b| b == b'\n')) {
         match std::str::from_utf8(line) {
             Ok(text) => {
                 if let Some(new) = scrub_str(text, line_no, ctx, findings) {
@@ -265,7 +264,6 @@ fn scrub_chunk(
             }
             Err(_) => out.extend_from_slice(line),
         }
-        line_no += 1;
     }
     changed.then_some(out)
 }
