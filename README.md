@@ -25,9 +25,29 @@ scrub-history status
 
 ## Install
 
+The hook runs automatically with access to all of your Claude Code history,
+so install a tagged release and use the locked dependency versions:
+
 ```bash
-cargo install --path .
+git clone https://github.com/benjamin-awd/claude-code-scrubify.git
+cd claude-code-scrubify
+git checkout scrub-history-v<version>   # latest tag, e.g. scrub-history-v0.4.0
+cargo install --locked --path .
 ```
+
+Confirm which binary your shell resolves, and that nothing else named
+`scrub-history` sits earlier on your `PATH`:
+
+```bash
+which -a scrub-history
+```
+
+The hook should reference the binary by its **absolute path**, for example
+`/Users/you/.cargo/bin/scrub-history hook`, not by bare name. Otherwise any
+`scrub-history` placed earlier on `PATH` would run with access to your chat
+history. `scrub-history init` writes the absolute path for you.
+
+See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 
 ## Usage
 
