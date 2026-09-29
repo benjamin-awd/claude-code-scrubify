@@ -71,7 +71,7 @@ pub fn compute_config_fingerprint(entropy_enabled: bool, entropy_threshold: f64)
     }
     hasher.update(entropy_threshold.to_le_bytes());
 
-    format!("{:x}", hasher.finalize())
+    crate::allowlist::to_hex(&hasher.finalize())
 }
 
 /// Check whether a file's current metadata matches a cache entry.

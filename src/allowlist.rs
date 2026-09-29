@@ -451,7 +451,18 @@ pub fn compile_custom_pattern(c: &CustomPatternConfig) -> std::result::Result<Re
 pub fn sha256_hex(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
-    format!("{:x}", hasher.finalize())
+    to_hex(&hasher.finalize())
+}
+
+/// Encode bytes as a lowercase hex string.
+pub fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 #[cfg(test)]
