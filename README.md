@@ -65,6 +65,39 @@ Scan all JSONL history files under `~/.claude/projects/` and redact secrets in p
 scrub-history scan --fix
 ```
 
+### What gets scanned
+
+Claude Code keeps secrets in more places than the session transcripts. By default `scan` covers all of them:
+
+| Location (`--skip` name) | Path under `~/.claude/` | Format | Default |
+|---|---|---|---|
+| `transcripts` | `projects/**/*.jsonl` | JSONL | redact |
+| `tool-results` | `projects/*/<session>/tool-results/*` (offloaded large tool outputs) | text | redact |
+| `jobs` | `jobs/**` (`tmp/parent-transcript.jsonl`, `timeline.jsonl`, scratch files) | JSONL + text | redact |
+| `history` | `history.jsonl` (every typed prompt and pasted content) | JSONL | redact |
+| `paste-cache` | `paste-cache/*` | text | redact |
+| `file-history` | `file-history/**` (pre-edit copies of files Claude edited) | text | redact |
+| `plans` | `plans/*.md` | text | redact |
+| `shell-snapshots` | `shell-snapshots/*.sh` | text | redact |
+| `claude-json` | `~/.claude.json` and `backups/.claude.json.backup.*` | JSON | **report only** |
+| `orphan-temps` | `.tmpXXXXXX` files left by an interrupted rewrite | — | delete if >1h old |
+
+```bash
+scrub-history scan --only-transcripts          # old behaviour: projects/**/*.jsonl only
+scrub-history scan --skip file-history         # keep rewind snapshots untouched
+scrub-history scan --skip file-history,plans   # comma-separated or repeated
+scrub-history scan --fix --skip file-history   # apply (without --fix, scan only previews)
+```
+
+How each kind is handled:
+
+- **Text files** are streamed in line-aligned chunks through the same detector as transcripts. Files with nothing to redact are never rewritten, so they stay byte-identical (line endings, trailing newline, encoding). Binary files (images, PDFs, archives, anything with a NUL byte in the first 8 KB) and files over 50 MB are skipped, the latter with a warning. Rewrites go through a temp file in the same directory, are fsynced, keep the original file's permissions, and are abandoned if the file changed during the scan. A `.json` file is left alone if redacting it would make it invalid JSON.
+- **Symlinks are never followed.** A location directory that is itself a symlink is only scanned if it resolves inside `~/.claude`.
+- **`~/.claude.json` is never modified.** Its `mcpServers.*.env` (and per-project `mcpServers`) values are what your MCP servers actually use, so redacting them would break those servers. `scan` reports the key path and pattern name of each secret-looking value (never the value itself). To fix a finding, move the secret out of the file: use `"env": {"API_TOKEN": "${API_TOKEN}"}` and export it from your shell or a keychain helper, rotate the exposed value, and delete old `~/.claude/backups/.claude.json.backup.*` copies.
+- **Orphaned temp files** are only touched if their name matches exactly what this tool's own atomic rewrite creates (`.tmp` plus 6 alphanumerics), they are regular files, and they are more than 1 hour old. Dry runs only list them.
+
+**Trade-offs.** `file-history` holds the snapshots Claude Code uses to rewind edits, so redacting it means a rewind restores `[REDACTED:…]` in place of the original secret. That is usually what you want, because these are often copies of `.env`, `tfvars` or `secrets.py`. If you rely on rewind to restore such files, use `--skip file-history`. Text redaction in `tool-results`, `plans` and `paste-cache` changes what Claude sees if it re-reads those files in a resumed session. First runs over a large `file-history` take longer. After that the mtime cache skips unchanged files.
+
 ### Hook mode
 
 Run the setup wizard (interactive) to install the hooks and create the config:

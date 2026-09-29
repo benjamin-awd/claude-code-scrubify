@@ -2,6 +2,7 @@ mod commands;
 
 use clap::{Parser, Subcommand};
 use scrub_history::entropy::EntropyConfig;
+use scrub_history::locations::{Location, LocationSet};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -36,7 +37,9 @@ enum Command {
     Hook,
     /// Interactive setup wizard — installs hook and writes config
     Init,
-    /// Scan all JSONL files under ~/.claude/projects/
+    /// Scan Claude Code history: transcripts, tool results, jobs, prompt
+    /// history, paste cache, file-history, plans and shell snapshots.
+    /// `~/.claude.json` is reported on but never modified.
     Scan {
         /// Apply redactions to files (default: preview only)
         #[arg(long)]
@@ -53,6 +56,15 @@ enum Command {
         /// Max parallel threads (default: half of available cores)
         #[arg(short, long)]
         jobs: Option<usize>,
+
+        /// Only scan session transcripts (projects/**/*.jsonl), the original behaviour
+        #[arg(long)]
+        only_transcripts: bool,
+
+        /// Skip a location (repeatable or comma-separated). E.g. `--skip file-history`
+        /// keeps Claude's rewind snapshots untouched.
+        #[arg(long, value_enum, value_delimiter = ',')]
+        skip: Vec<Location>,
     },
     /// Show hook config, last run stats, coverage, and performance info
     Status,
@@ -97,7 +109,18 @@ fn main() {
             no_truncate,
             no_cache,
             jobs,
-        } => commands::scan::run_scan(fix, no_truncate, no_cache, jobs, &entropy_cfg),
+            only_transcripts,
+            skip,
+        } => commands::scan::run_scan(
+            &commands::scan::ScanOptions {
+                fix,
+                no_truncate,
+                no_cache,
+                jobs,
+                locations: LocationSet::from_flags(only_transcripts, &skip),
+            },
+            &entropy_cfg,
+        ),
         Command::Status => commands::status::run_status(),
     }
 }
