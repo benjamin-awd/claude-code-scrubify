@@ -79,6 +79,25 @@ impl PatternSet {
     }
 }
 
+/// Stable hash of the built-in pattern definitions (name, regex, keywords,
+/// secret group). Feeds the cache fingerprint so pattern changes force a rescan.
+pub fn built_in_fingerprint() -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    for p in built_in_patterns().unwrap_or_default() {
+        hasher.update(p.name.as_bytes());
+        hasher.update([0]);
+        hasher.update(p.regex.as_str().as_bytes());
+        hasher.update([0]);
+        hasher.update(p.keywords.join(",").as_bytes());
+        hasher.update([0]);
+        hasher.update(format!("{:?}", p.secret_group).as_bytes());
+        hasher.update([0xff]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 fn built_in_patterns() -> Result<Vec<SecretPattern>> {
     // (name, regex, keywords, secret_group)
     //
@@ -731,6 +750,13 @@ mod tests {
         for p in &patterns {
             assert!(!p.regex.is_match(prose), "{} matched prose", p.name);
         }
+    }
+
+    #[test]
+    fn built_in_fingerprint_is_stable() {
+        let fp = built_in_fingerprint();
+        assert_eq!(fp.len(), 64);
+        assert_eq!(fp, built_in_fingerprint());
     }
 
     #[test]
