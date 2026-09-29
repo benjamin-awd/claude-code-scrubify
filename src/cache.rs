@@ -51,25 +51,42 @@ pub fn save(cache: &ScanCache) -> Result<()> {
     std::fs::write(&path, data.as_bytes()).context(format!("writing {}", path.display()))
 }
 
-/// Compute a fingerprint from scrubber.toml contents and entropy config flags.
+/// Compute a fingerprint from scrubber.toml contents, entropy config flags, the
+/// binary version and the built-in pattern set. Any change invalidates the scan
+/// cache and hook offsets, so upgrades that add patterns rescan old history.
 pub fn compute_config_fingerprint(entropy_enabled: bool, entropy_threshold: f64) -> String {
+    let toml = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|h| std::fs::read(h.join(".claude").join("scrubber.toml")).ok());
+    let engine = format!(
+        "{}:{}",
+        env!("CARGO_PKG_VERSION"),
+        crate::patterns::built_in_fingerprint()
+    );
+    fingerprint_from_parts(toml.as_deref(), entropy_enabled, entropy_threshold, &engine)
+}
+
+fn fingerprint_from_parts(
+    toml: Option<&[u8]>,
+    entropy_enabled: bool,
+    entropy_threshold: f64,
+    engine: &str,
+) -> String {
     let mut hasher = Sha256::new();
 
-    // Hash scrubber.toml contents if present
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        let toml_path = home.join(".claude").join("scrubber.toml");
-        if let Ok(contents) = std::fs::read(&toml_path) {
-            hasher.update(&contents);
-        }
+    if let Some(contents) = toml {
+        hasher.update(contents);
     }
 
-    // Hash entropy settings
     if entropy_enabled {
         hasher.update(b"entropy:on");
     } else {
         hasher.update(b"entropy:off");
     }
     hasher.update(entropy_threshold.to_le_bytes());
+
+    hasher.update(b"engine:");
+    hasher.update(engine.as_bytes());
 
     crate::allowlist::to_hex(&hasher.finalize())
 }
@@ -102,4 +119,22 @@ pub fn cache_entry_from_path(path: &Path) -> Option<CacheEntry> {
         mtime_nanos: dur.subsec_nanos(),
         size: meta.len(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_change_invalidates_fingerprint() {
+        let a = fingerprint_from_parts(Some(b"x"), true, 4.5, "0.4.0:aaa");
+        let b = fingerprint_from_parts(Some(b"x"), true, 4.5, "0.4.0:bbb");
+        let c = fingerprint_from_parts(Some(b"x"), true, 4.5, "0.5.0:aaa");
+        assert_ne!(a, b, "pattern set change must invalidate");
+        assert_ne!(a, c, "version change must invalidate");
+        assert_eq!(
+            a,
+            fingerprint_from_parts(Some(b"x"), true, 4.5, "0.4.0:aaa")
+        );
+    }
 }
