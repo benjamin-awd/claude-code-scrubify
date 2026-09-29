@@ -60,10 +60,9 @@ fn run_status_inner(section: Option<StatusSection>, all: bool) -> Result<()> {
             print_scan_detail(persistent.last_scan.as_ref(), &discover());
         }
         None => {
-            let discovery = discover();
-            print_overview(&claude_dir, &settings_path, &persistent, &discovery, all);
+            print_overview(&claude_dir, &settings_path, &persistent, all);
             if all {
-                print_scan_detail(persistent.last_scan.as_ref(), &discovery);
+                print_scan_detail(persistent.last_scan.as_ref(), &discover());
             } else {
                 println!(
                     "\n  {}",
@@ -82,7 +81,6 @@ fn print_overview(
     claude_dir: &Path,
     settings_path: &Path,
     persistent: &PersistentStats,
-    discovery: &Discovery,
     all: bool,
 ) {
     // ── Hooks ───────────────────────────────────────
@@ -299,56 +297,12 @@ fn print_overview(
             let _ = write!(duration, " ({per_file:.1}ms per scanned file)");
         }
         display::kv("Duration", duration);
+        if scan.errors > 0 {
+            display::kv("Errors", format!("{}", scan.errors).red());
+        }
     } else {
         display::empty("No scan runs recorded yet");
     }
-
-    // ── Needs Attention ─────────────────────────────
-    let items = attention_items(persistent.last_scan.as_ref(), discovery.orphans.len());
-    if !items.is_empty() {
-        display::section("Needs Attention");
-        for (msg, hint) in items {
-            println!("  {} {msg}  {}", "!".yellow().bold(), hint.dimmed());
-        }
-    }
-}
-
-/// Actionable problems for the overview, as `(message, hint)` pairs.
-fn attention_items(scan: Option<&ScanRunStats>, orphans: usize) -> Vec<(String, String)> {
-    let mut items = Vec::new();
-    if let Some(scan) = scan {
-        if scan.dry_run && scan.total_redactions > 0 {
-            items.push((
-                format!(
-                    "Last scan was a dry-run: {} redaction(s) in {} file(s) not applied",
-                    scan.total_redactions, scan.files_modified
-                ),
-                "→ scrub-history scan --fix".into(),
-            ));
-        }
-        if scan.errors > 0 {
-            items.push((
-                format!("Last scan hit {} error(s)", scan.errors),
-                "→ scrub-history scan -v".into(),
-            ));
-        }
-        if scan.config_findings > 0 {
-            items.push((
-                format!(
-                    "~/.claude.json has {} secret-looking MCP value(s) (never modified)",
-                    scan.config_findings
-                ),
-                "→ scrub-history scan".into(),
-            ));
-        }
-    }
-    if orphans > 0 {
-        items.push((
-            format!("{orphans} orphan temp file(s)"),
-            "→ scrub-history scan --fix removes stale ones".into(),
-        ));
-    }
-    items
 }
 
 fn print_hooks_detail(settings_path: &Path) {
@@ -580,37 +534,6 @@ mod tests {
         assert_eq!(text.matches("resolved via PATH").count(), 1, "{text}");
         assert!(text.contains("SessionEnd hook: installed"), "{text}");
         assert!(text.contains("SubagentStop hook: not installed"), "{text}");
-    }
-
-    fn scan_stats(dry_run: bool, redactions: u64, errors: u64, config: u64) -> ScanRunStats {
-        serde_json::from_value(serde_json::json!({
-            "timestamp_epoch": 0, "files_scanned": 3, "files_modified": 2,
-            "total_redactions": redactions, "errors": errors, "duration_ms": 10,
-            "dry_run": dry_run, "config_findings": config,
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn attention_items_flag_actionable_problems() {
-        assert!(attention_items(None, 0).is_empty());
-        assert!(attention_items(Some(&scan_stats(false, 5, 0, 0)), 0).is_empty());
-        assert!(attention_items(Some(&scan_stats(true, 0, 0, 0)), 0).is_empty());
-
-        let items = attention_items(Some(&scan_stats(true, 59, 1, 6)), 3);
-        let text = items
-            .iter()
-            .map(|(m, h)| format!("{m} {h}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(items.len(), 4, "{text}");
-        assert!(
-            text.contains("59 redaction(s) in 2 file(s) not applied"),
-            "{text}"
-        );
-        assert!(text.contains("1 error(s)"), "{text}");
-        assert!(text.contains("6 secret-looking MCP value(s)"), "{text}");
-        assert!(text.contains("3 orphan temp file(s)"), "{text}");
     }
 
     #[test]
