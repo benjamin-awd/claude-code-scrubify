@@ -1,0 +1,68 @@
+name: Perf comment
+
+# Posts the CI perf job's instruction-count table as a sticky PR comment.
+# Split from CI so the job that runs PR code never holds a write token:
+# this workflow only reads the rendered markdown artifact. It runs from the
+# default branch, so changes here take effect once merged.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        # No artifact when the perf job was skipped or cancelled.
+        continue-on-error: true
+        with:
+          name: perf-report
+          path: perf-report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Post or update comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ ! -f perf-report/report.md ]; then
+            echo "No perf report for this run."
+            exit 0
+          fi
+          pr=$(cat perf-report/pr-number)
+          if ! [[ "$pr" =~ ^[0-9]+$ ]]; then
+            echo "::error::Bad PR number in artifact"
+            exit 1
+          fi
+          # The artifact was produced by PR code: only trust its PR number if
+          # that PR's head is the commit this CI run tested. A newer push has
+          # its own run, which will update the comment instead.
+          if [ "$(gh api "repos/$REPO/pulls/$pr" --jq .head.sha)" != "$HEAD_SHA" ]; then
+            echo "PR #$pr has moved past $HEAD_SHA; skipping."
+            exit 0
+          fi
+
+          marker='<!-- perf-report -->'
+          {
+            echo "$marker"
+            head -c 60000 perf-report/report.md
+            echo
+            echo "<sub>Commit ${HEAD_SHA:0:7}</sub>"
+          } > body.md
+
+          id=$(gh api --paginate "repos/$REPO/issues/$pr/comments" \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@body.md >/dev/null
+          else
+            gh api "repos/$REPO/issues/$pr/comments" -F body=@body.md >/dev/null
+          fi

@@ -149,21 +149,46 @@ jobs:
             cargo bench --locked --bench hook_regression -- --save-baseline=base
           echo "compare=true" >> "$GITHUB_OUTPUT"
       - name: Benchmark head and compare
+        id: head
         working-directory: head
         env:
           HEAD_VER: ${{ steps.runner.outputs.head }}
           COMPARE: ${{ steps.base.outputs.compare }}
+          # summary.json per benchmark, rendered into the PR comment below.
+          GUNGRAUN_SAVE_SUMMARY: json
         run: |
           export GUNGRAUN_RUNNER="$RUNNER_TEMP/gungraun-runner/$HEAD_VER/bin/gungraun-runner"
           if [ "$COMPARE" != true ]; then
+            echo "mode=no-base" >> "$GITHUB_OUTPUT"
             cargo bench --locked --bench hook_regression
           elif ! diff -rq ../base/benches/common benches/common >/dev/null; then
             # A different corpus makes base and head numbers incomparable.
             echo "::warning::Benchmark corpus changed in this PR; reporting without enforcing limits."
+            echo "mode=report-only" >> "$GITHUB_OUTPUT"
             cargo bench --locked --bench hook_regression -- --baseline=base
           else
+            echo "mode=enforced" >> "$GITHUB_OUTPUT"
             cargo bench --locked --bench hook_regression -- --baseline=base --callgrind-limits="$PERF_LIMITS"
           fi
+      # Runs even when the limits fail, so the PR shows which benchmark regressed.
+      # The comment itself is posted by perf-comment.yml: this job runs PR code
+      # with a read-only token (always so for Dependabot and fork PRs).
+      - name: Render perf report
+        if: always() && steps.head.outputs.mode != ''
+        env:
+          MODE: ${{ steps.head.outputs.mode }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir -p perf-report
+          python3 head/.github/scripts/perf_report.py "$GUNGRAUN_HOME" "$MODE" > perf-report/report.md
+          echo "$PR_NUMBER" > perf-report/pr-number
+          cat perf-report/report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && steps.head.outputs.mode != ''
+        with:
+          name: perf-report
+          path: perf-report/
+          retention-days: 7
 
   deny:
     name: cargo-deny
