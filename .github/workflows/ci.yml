@@ -97,18 +97,36 @@ jobs:
           ver() { awk '/^name = "gungraun-runner"$/ {getline; gsub(/"/, "", $3); print $3}' "$1/Cargo.lock"; }
           echo "head=$(ver head)" >> "$GITHUB_OUTPUT"
           echo "base=$(ver base)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/gungraun-runner
-          key: gungraun-runner-${{ runner.os }}-${{ steps.runner.outputs.base }}-${{ steps.runner.outputs.head }}
       - name: Install gungraun-runner
         env:
           HEAD_VER: ${{ steps.runner.outputs.head }}
           BASE_VER: ${{ steps.runner.outputs.base }}
+        # Prebuilt release binaries, verified against checksums pinned here
+        # (upstream publishes no provenance attestations, and a .sha256 from
+        # the same release proves only integrity). Unpinned versions, e.g.
+        # after a Dependabot bump, fall back to building from crates.io:
+        # slower but equally trusted. Pin the new hash to restore the fast path.
         run: |
-          for v in $HEAD_VER $BASE_VER; do
-            root="$RUNNER_TEMP/gungraun-runner/$v"
-            [ -x "$root/bin/gungraun-runner" ] || cargo install --locked gungraun-runner --version "$v" --root "$root"
+          declare -A PINNED=(
+            [0.20.0]=b3b39d4243e43597512a1f79016a1f38cbf90e5869c0c2535fe4097c69ed91aa
+          )
+          target=x86_64-unknown-linux-gnu
+          for v in $(printf '%s\n' "$HEAD_VER" "$BASE_VER" | sort -u); do
+            [ -n "$v" ] || continue
+            dest="$RUNNER_TEMP/gungraun-runner/$v/bin"
+            mkdir -p "$dest"
+            sha="${PINNED[$v]:-}"
+            if [ -n "$sha" ]; then
+              name="gungraun-runner-v$v-$target"
+              curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+                "https://github.com/gungraun/gungraun/releases/download/v$v/$name.tar.gz"
+              echo "$sha  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+              tar xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+              mv "$RUNNER_TEMP/$name/gungraun-runner" "$dest/"
+            else
+              echo "::notice::No pinned checksum for gungraun-runner $v; building from crates.io."
+              cargo install --locked gungraun-runner --version "$v" --root "$RUNNER_TEMP/gungraun-runner/$v"
+            fi
           done
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
