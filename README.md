@@ -276,7 +276,8 @@ transcripts (~2.4 KB/line, p50 ~616 KB):
 CI benchmarks the PR's base commit, then the PR, and fails if any benchmark
 executes more than 10% more instructions. If a PR changes `benches/common`,
 base and head numbers aren't comparable, so the job reports without enforcing
-the limit.
+the limit. Either way, the base-vs-head table is posted as a PR comment
+(updated on each push) and shown in the job summary.
 
 Run locally:
 
