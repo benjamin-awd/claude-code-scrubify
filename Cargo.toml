@@ -20,6 +20,7 @@ colored = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indicatif = "0.18.4"
 bytecount = "0.6.9"
+mimalloc = "0.1.52"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
