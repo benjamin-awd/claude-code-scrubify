@@ -49,16 +49,7 @@ impl PatternSet {
 
         if !skip_custom {
             let settings = crate::allowlist::load_config()?;
-            for c in settings.custom_patterns {
-                let regex = Regex::new(&c.regex)
-                    .with_context(|| format!("invalid regex for custom pattern '{}'", c.name))?;
-                patterns.push(SecretPattern {
-                    name: c.name,
-                    regex,
-                    keywords: c.keywords,
-                    secret_group: c.secret_group,
-                });
-            }
+            patterns.extend(compile_custom_patterns(settings.custom_patterns));
         }
 
         let raw: Vec<&str> = patterns.iter().map(|p| p.regex.as_str()).collect();
@@ -77,6 +68,37 @@ impl PatternSet {
             all_keywords,
         })
     }
+}
+
+/// Compile user-defined patterns. A bad custom pattern must not disable
+/// redaction: it is skipped with a warning (built-ins and the other custom
+/// patterns still load). The warning never includes the regex source, which
+/// may embed a literal secret.
+fn compile_custom_patterns(
+    custom: Vec<crate::allowlist::CustomPatternConfig>,
+) -> Vec<SecretPattern> {
+    let mut out = Vec::with_capacity(custom.len());
+    for c in custom {
+        let regex = match crate::allowlist::compile_custom_pattern(&c) {
+            Ok(r) => r,
+            Err(reason) => {
+                tracing::warn!(
+                    pattern = %c.name,
+                    %reason,
+                    "skipping invalid custom pattern from scrubber.toml"
+                );
+                continue;
+            }
+        };
+        out.push(SecretPattern {
+            name: c.name,
+            // Keywords are matched against lowercased text.
+            keywords: c.keywords.iter().map(|k| k.to_lowercase()).collect(),
+            regex,
+            secret_group: c.secret_group,
+        });
+    }
+    out
 }
 
 fn built_in_patterns() -> Result<Vec<SecretPattern>> {
@@ -326,6 +348,37 @@ fn built_in_patterns() -> Result<Vec<SecretPattern>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bad_custom_patterns_are_skipped_not_fatal() {
+        use crate::allowlist::CustomPatternConfig;
+        let mk = |name: &str, regex: &str| CustomPatternConfig {
+            name: name.into(),
+            regex: regex.into(),
+            keywords: vec!["ITK_".into()],
+            secret_group: None,
+        };
+        let custom = vec![
+            mk("broken", "itk_secretliteral("),
+            mk("huge", r"\w{5000}\w{5000}"),
+            mk("good", "itk_[a-z0-9]{12}"),
+        ];
+        let (compiled, logs) =
+            crate::allowlist::tests::capture_logs(|| compile_custom_patterns(custom));
+        assert_eq!(compiled.len(), 1);
+        assert_eq!(compiled[0].name, "good");
+        assert_eq!(compiled[0].keywords, vec!["itk_"]);
+        assert!(logs.contains("broken") && logs.contains("huge"), "{logs}");
+        assert!(!logs.contains("secretliteral"), "regex leaked: {logs}");
+
+        // Built-ins plus the surviving custom pattern still form a valid set.
+        let mut all = built_in_patterns().unwrap();
+        let builtin = all.len();
+        all.extend(compiled);
+        assert_eq!(all.len(), builtin + 1);
+        let raw: Vec<&str> = all.iter().map(|p| p.regex.as_str()).collect();
+        assert!(RegexSet::new(&raw).is_ok());
+    }
 
     fn check(pattern_name: &str, positives: &[&str], negatives: &[&str]) {
         let patterns = built_in_patterns().unwrap();
