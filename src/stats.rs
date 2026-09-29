@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -42,6 +42,29 @@ pub struct ScanRunStats {
     pub files_cached: u64,
     #[serde(default)]
     pub redactions_by_pattern: HashMap<String, u64>,
+    /// Per-location breakdown, keyed by location name (e.g. `file-history`).
+    #[serde(default)]
+    pub by_location: BTreeMap<String, LocationRunStats>,
+    /// Secret-looking values found in `~/.claude.json` and its backups (report-only).
+    #[serde(default)]
+    pub config_findings: u64,
+    #[serde(default)]
+    pub orphans_found: u64,
+    #[serde(default)]
+    pub orphans_removed: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct LocationRunStats {
+    pub files_found: u64,
+    pub files_scanned: u64,
+    pub files_cached: u64,
+    /// Files with at least one finding (rewritten unless dry-run).
+    pub files_modified: u64,
+    pub redactions: u64,
+    /// Binary, oversized, symlinked, or changed-during-scan files.
+    pub files_skipped: u64,
+    pub errors: u64,
 }
 
 pub struct LatencySummary {

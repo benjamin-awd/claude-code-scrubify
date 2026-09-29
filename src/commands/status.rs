@@ -1,12 +1,14 @@
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use colored::Colorize;
 use scrub_history::allowlist;
 use scrub_history::display;
+use scrub_history::locations::{self, Location};
 use scrub_history::patterns::PatternSet;
 use scrub_history::stats;
-use walkdir::WalkDir;
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 pub(crate) fn run_status() {
@@ -298,6 +300,38 @@ fn run_status_inner() -> Result<()> {
             let per_file = scan.duration_ms as f64 / scan.files_scanned as f64;
             display::kv("Throughput", format!("{per_file:.1}ms/file"));
         }
+        for (name, loc) in &scan.by_location {
+            let mut line = format!(
+                "{} files, {} scanned, {} modified, {} redactions",
+                loc.files_found, loc.files_scanned, loc.files_modified, loc.redactions
+            );
+            if loc.files_skipped > 0 {
+                let _ = write!(line, ", {} skipped", loc.files_skipped);
+            }
+            if loc.errors > 0 {
+                let _ = write!(line, ", {} errors", loc.errors);
+            }
+            display::kv(&format!("  {name}"), line);
+        }
+        if scan.orphans_found > 0 {
+            display::kv(
+                "Orphan temps",
+                format!(
+                    "{} found, {} removed",
+                    scan.orphans_found, scan.orphans_removed
+                ),
+            );
+        }
+        if scan.config_findings > 0 {
+            display::kv(
+                "~/.claude.json",
+                format!(
+                    "{} secret-looking MCP value(s), not modified (see `scan` output)",
+                    scan.config_findings
+                )
+                .yellow(),
+            );
+        }
     } else {
         display::empty("No scan runs recorded yet");
     }
@@ -305,25 +339,41 @@ fn run_status_inner() -> Result<()> {
     // ── Coverage ────────────────────────────────────
     display::section("Coverage");
 
-    let projects_dir = claude_dir.join("projects");
-    if projects_dir.exists() {
-        let mut total_files: u64 = 0;
-        let mut total_bytes: u64 = 0;
-        for entry in WalkDir::new(&projects_dir)
-            .into_iter()
-            .filter_map(std::result::Result::ok)
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-        {
-            total_files += 1;
-            if let Ok(meta) = entry.metadata() {
-                total_bytes += meta.len();
-            }
+    let discovery = locations::discover(
+        &claude_dir,
+        &home.join(".claude.json"),
+        &locations::LocationSet::all(),
+        std::time::SystemTime::now(),
+    );
+    if discovery.targets.is_empty() {
+        display::empty("No history files found under ~/.claude/");
+    } else {
+        let mut per_loc: BTreeMap<Location, (u64, u64)> = BTreeMap::new();
+        for t in &discovery.targets {
+            let e = per_loc.entry(t.location).or_default();
+            e.0 += 1;
+            e.1 += std::fs::metadata(&t.path).map_or(0, |m| m.len());
         }
-
+        let (mut total_files, mut total_bytes) = (0u64, 0u64);
+        for (loc, (files, bytes)) in &per_loc {
+            total_files += files;
+            total_bytes += bytes;
+            display::kv(
+                loc.name(),
+                format!("{files} files ({})", display::format_bytes(*bytes)),
+            );
+        }
         display::kv("History files", format!("{total_files}"));
         display::kv("Total size", display::format_bytes(total_bytes));
-    } else {
-        display::empty("No projects directory found (~/.claude/projects/)");
+    }
+    if !discovery.orphans.is_empty() {
+        display::kv(
+            "Orphan temps",
+            format!(
+                "{} (run `scrub-history scan --fix` to remove stale ones)",
+                discovery.orphans.len()
+            ),
+        );
     }
 
     println!();
