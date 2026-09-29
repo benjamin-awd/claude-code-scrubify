@@ -8,7 +8,7 @@ Claude Code stores conversation transcripts as JSONL files under `~/.claude/proj
 
 ## Features
 
-- **20+ built-in secret patterns** — AWS keys, GitHub/GitLab tokens, JWTs, private keys, database connection strings, Stripe/Slack/OpenAI/Anthropic keys, and more
+- **30+ built-in secret patterns** — AWS keys, GitHub/GitLab tokens, JWTs, private keys, GCP service-account keys, database connection strings, Stripe/Slack/OpenAI/Anthropic/Grafana/Vault keys, and more
 - **Entropy-based detection** — catches high-entropy strings that look like tokens even without a known pattern
 - **Two modes** — run as a Claude Code hook (real-time) or bulk-scan all history files
 - **Custom patterns** — add your own via `~/.claude/scrubber-patterns.json`
@@ -105,11 +105,19 @@ These are merged with the built-in patterns at runtime.
 | Private keys | PEM-format `-----BEGIN *PRIVATE KEY-----` |
 | Database | Connection strings (`postgres://`, `mongodb://`, etc.) |
 | Stripe | `sk_live_*`, `pk_test_*`, `rk_*` |
-| Slack | Bot/app tokens (`xoxb-*`, `xoxp-*`), webhooks |
+| Slack | Bot/user tokens (`xoxb-*`, `xoxp-*`), app-level tokens (`xapp-*`), webhooks |
 | Anthropic | `sk-ant-*` |
 | OpenAI | `sk-*` (with false-positive filtering) |
-| Google | API keys (`AIza*`), OAuth secrets |
+| Google | API keys (`AIza*`), OAuth secrets, service-account JSON `private_key` values |
 | npm | `npm_*` |
+| Grafana | Service-account tokens (`glsa_*`), Cloud access-policy tokens (`glc_*`), legacy API keys (`eyJrIjoi*`) |
+| HashiCorp Vault | Service/batch tokens (`hvs.*`, `hvb.*`) |
+| Terraform Cloud | API tokens (`*.atlasv1.*`) |
+| Doppler | `dp.pt.*`, `dp.st.*`, `dp.sa.*`, `dp.ct.*`, `dp.scim.*`, `dp.audit.*` |
+| DigitalOcean | `dop_v1_*`, `doo_v1_*`, `dor_v1_*` |
+| PyPI | Upload tokens for pypi.org and test.pypi.org (`pypi-AgE*`) |
+| age | Secret keys (`AGE-SECRET-KEY-1*`) |
+| Twilio / SendGrid / Heroku | `SK*`, `SG.*`, Heroku API keys |
 | Generic | `api_key=`, `apikey=`, password assignments |
 
 ## License
