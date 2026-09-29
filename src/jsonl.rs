@@ -128,25 +128,30 @@ fn scrub_jsonl_file_with_hook(
         other => other,
     };
 
-    // Incremental fast path: scan only the appended tail, read-only. A clean
-    // tail (the common case after a turn) needs no temp file and no O(file)
-    // prefix copy; only when it contains a secret do we fall through to the
-    // full rewrite below, which rescans that small tail.
-    if let Some(offset) = skip_bytes
-        && !ctx.dry_run
-    {
-        let mut probe = LineState {
-            ctx,
-            line_number: 0,
-            out_len: offset,
-            redactions: Vec::new(),
-            lines_modified: 0,
-            diffs: Vec::new(),
-        };
-        let (pos, _eof) = probe.process_complete_lines(&mut file, offset, &mut io::sink())?;
-        if probe.redactions.is_empty() {
-            return Ok(probe.into_result(pos));
-        }
+    // Read-only fast path: scan the file (or just the appended tail) without
+    // writing. Clean input (nearly every file in a full scan, and the common
+    // case after a turn) and dry runs need no temp file and no O(file) copy;
+    // only when a secret turns up do we fall through to the rewrite below,
+    // which rescans it.
+    let offset = skip_bytes.unwrap_or(0);
+    // Dry-run diffs report absolute line numbers, so count the skipped prefix.
+    let line_number = if ctx.dry_run && offset > 0 {
+        file.seek(SeekFrom::Start(0))?;
+        copy_counting_lines(&mut file, &mut io::sink(), offset)?
+    } else {
+        0
+    };
+    let mut probe = LineState {
+        ctx,
+        line_number,
+        out_len: offset,
+        redactions: Vec::new(),
+        lines_modified: 0,
+        diffs: Vec::new(),
+    };
+    let (pos, _eof) = probe.process_complete_lines(&mut file, offset, &mut io::sink())?;
+    if ctx.dry_run || probe.redactions.is_empty() {
+        return Ok(probe.into_result(pos));
     }
 
     let dir = path
@@ -180,8 +185,9 @@ fn scrub_jsonl_file_with_hook(
         let eof;
         (pos, eof) = state.process_complete_lines(&mut file, pos, &mut writer)?;
 
-        if ctx.dry_run || state.redactions.is_empty() {
-            // Source is left untouched: the next run resumes after the last
+        if state.redactions.is_empty() {
+            // Nothing to redact on the rescan (dry runs returned above): the
+            // source is left untouched and the next run resumes after the last
             // complete line we examined.
             return Ok(state.into_result(pos));
         }
@@ -351,7 +357,7 @@ impl LineState<'_> {
             if redactions.is_empty() {
                 return Ok(None);
             }
-            (redactions, scrubbed)
+            (redactions, scrubbed.into_owned())
         };
 
         self.lines_modified += 1;

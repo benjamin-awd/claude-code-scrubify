@@ -285,5 +285,5 @@ fn scrub_str(
             line,
         });
     }
-    Some(scrubbed)
+    Some(scrubbed.into_owned())
 }

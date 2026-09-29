@@ -14,10 +14,15 @@ use tempfile::TempDir;
 fn bench_scrub_text(c: &mut Criterion) {
     let fx = Fixture::new();
     let clean = common::text_chunk();
+    let non_ascii = clean.replace('\n', " →\n");
     let with_secret = clean.clone() + &common::secret_line();
 
     let mut group = c.benchmark_group("scrub_text");
-    for (name, text) in [("clean", &clean), ("with_secret", &with_secret)] {
+    for (name, text) in [
+        ("clean", &clean),
+        ("non_ascii", &non_ascii),
+        ("with_secret", &with_secret),
+    ] {
         group.bench_function(name, |b| {
             b.iter(|| {
                 scrub_text(
