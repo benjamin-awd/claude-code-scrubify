@@ -8,8 +8,10 @@ Claude Code stores conversation transcripts as JSONL files under `~/.claude/proj
 
 ## Features
 
-- **30+ built-in secret patterns** — AWS keys, GitHub/GitLab tokens, JWTs, private keys, GCP service-account keys, database connection strings, Stripe/Slack/OpenAI/Anthropic/Grafana/Vault keys, and more
-- **Entropy-based detection** — catches high-entropy strings that look like tokens even without a known pattern
+- **50+ built-in secret patterns** — AWS keys and session tokens, GitHub/GitLab tokens, JWTs, whole PEM private-key blocks, GCP service-account and GCS HMAC keys, credentials in any URL, env/YAML/`.netrc`/`.pypirc` assignments, `mysql -p`/`curl -u`, HTTP auth headers, Kubernetes Secrets, Docker and kubeconfig credentials, Stripe/Slack/OpenAI/Anthropic/Grafana/Vault keys, and more
+- **Key-aware JSON scrubbing** — values under sensitive keys (`password`, `dbPassword`, `x-api-key`, `credentials`, …) are redacted, including nested objects and arrays
+- **Percent-encoding aware** — `%2F`-style escapes can't split a secret past the detectors
+- **Entropy-based detection** — catches random-looking tokens without a known pattern, with length-scaled thresholds (so 20-char tokens are caught) and key-context detection for hex keys
 - **Two modes** — run as a Claude Code hook (real-time) or bulk-scan all history files
 - **Custom patterns** — add your own as `[[patterns]]` in `~/.claude/scrubber.toml`
 - **Dry-run** — preview what would be redacted before modifying anything
@@ -168,7 +170,7 @@ Notes:
 -v, --verbose              Enable debug logging (-vv for trace)
 -q, --quiet                Suppress all output except errors
 --no-entropy               Disable entropy-based detection
---entropy-threshold <F>    Shannon entropy threshold (default: 4.5)
+--entropy-threshold <F>    Shannon entropy threshold (default: 4.5; caps the length-scaled threshold)
 ```
 
 Scan-specific:
@@ -228,17 +230,17 @@ A bad config never silently turns redaction off:
 
 | Category | Examples |
 |---|---|
-| AWS | Access keys (`AKIA*`), secret keys |
+| AWS | Access keys (`AKIA*`), secret keys, session tokens (`aws_session_token`) |
 | GitHub | Classic tokens (`ghp_*`), fine-grained (`github_pat_*`) |
 | GitLab | Personal access tokens (`glpat-*`) |
 | JWT | `eyJ*` tokens |
-| Private keys | PEM-format `-----BEGIN *PRIVATE KEY-----` |
-| Database | Connection strings (`postgres://`, `mongodb://`, etc.) |
+| Private keys | Whole PEM blocks, header through `END` line: PKCS#8, RSA, EC, DSA, OpenSSH, encrypted, PGP (`-----BEGIN * PRIVATE KEY( BLOCK)-----`) |
+| Database / URLs | Connection strings (`postgres://`, `mongodb://`, etc.); password in any URL's userinfo (`rediss://`, `postgresql+psycopg2://`, `https://user:pass@`) |
 | Stripe | `sk_live_*`, `pk_test_*`, `rk_*` |
-| Slack | Bot/user tokens (`xoxb-*`, `xoxp-*`), app-level tokens (`xapp-*`), webhooks |
+| Slack | Bot/user/config tokens (`xoxb-*`, `xoxp-*`, `xoxa-*`, `xoxe-*`, `xoxo-*`), app-level tokens (`xapp-*`), webhooks |
 | Anthropic | `sk-ant-*` |
-| OpenAI | `sk-*` (with false-positive filtering) |
-| Google | API keys (`AIza*`), OAuth secrets, service-account JSON `private_key` values |
+| OpenAI | Project/service-account/admin keys (`sk-proj-*`, `sk-svcacct-*`, `sk-admin-*`), legacy `sk-*` (with false-positive filtering) |
+| Google | API keys (`AIza*`), OAuth secrets, service-account JSON `private_key` values, GCS HMAC access IDs (`GOOG*`, 24/61 chars) |
 | npm | `npm_*` |
 | Grafana | Service-account tokens (`glsa_*`), Cloud access-policy tokens (`glc_*`), legacy API keys (`eyJrIjoi*`) |
 | HashiCorp Vault | Service/batch tokens (`hvs.*`, `hvb.*`) |
@@ -248,7 +250,16 @@ A bad config never silently turns redaction off:
 | PyPI | Upload tokens for pypi.org and test.pypi.org (`pypi-AgE*`) |
 | age | Secret keys (`AGE-SECRET-KEY-1*`) |
 | Twilio / SendGrid / Heroku | `SK*`, `SG.*`, Heroku API keys |
-| Generic | `api_key=`, `apikey=`, password assignments |
+| HTTP auth | `Authorization: Basic <b64>`, `Bearer <token>` |
+| Kubernetes / Docker | Secret `data:`/`stringData:` blocks (YAML and JSON, only when `kind: Secret`), kubeconfig `token:`/`client-key-data:`, `.dockerconfigjson` `"auth"` values |
+| CLI / config files | `export DB_PASSWORD=…`, `PGPASSWORD=…`, YAML/INI `password: …`, `.netrc` `password …`, `.pypirc`, `mysql -p…`, `curl -u user:pass` |
+| Generic | `api_key=`, `apikey=`, password assignments, incl. JSON (`"password": "…"`), escaped JSON and backtick-quoted values |
+
+Key/value patterns redact only the value and skip variable references
+(`$VAR`, `${VAR}`), obvious placeholders (`changeme`, `<…>`, `xxx…`,
+`your_…`) and, for unquoted values, code (`settings.SECRET_KEY`,
+`os.environ[...]`, multi-word identifiers). `TOKEN_TYPE=`,
+`PASSWORD_MIN_LENGTH=` and `MAX_TOKENS=` are not credentials.
 
 ## License
 
