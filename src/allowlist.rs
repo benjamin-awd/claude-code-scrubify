@@ -1,25 +1,18 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 /// Default minimum length for a blacklist entry. Matches `MIN_SECRET_LEN` in scrubber.
 const DEFAULT_MIN_BLACKLIST_ENTRY_LEN: usize = 8;
 
-#[derive(Deserialize, Default)]
-struct Config {
-    #[serde(default)]
-    allowlist: AllowlistConfig,
-    #[serde(default)]
-    entropy: EntropyTomlConfig,
-    #[serde(default)]
-    blacklist: BlacklistConfig,
-    #[serde(default)]
-    patterns: Vec<CustomPatternConfig>,
-}
+/// Compiled-size limit for user-supplied regexes (same as the `regex` crate
+/// default). Oversized patterns are skipped instead of aborting the load.
+const CUSTOM_PATTERN_SIZE_LIMIT: usize = 10 * (1 << 20);
 
 #[derive(Deserialize, Clone)]
 pub struct CustomPatternConfig {
@@ -66,6 +59,22 @@ pub struct ScrubberSettings {
     pub entropy_exclude_patterns: Vec<String>,
     /// User-defined secret detection patterns.
     pub custom_patterns: Vec<CustomPatternConfig>,
+    /// Problems found while loading the config. These messages never contain
+    /// config values (which may be secrets), only locations and section names.
+    pub config_errors: Vec<String>,
+}
+
+impl ScrubberSettings {
+    /// Built-in defaults: no allowlist, no blacklist, no custom patterns.
+    pub fn defaults() -> Self {
+        ScrubberSettings {
+            allowlist: Allowlist::empty(),
+            blacklist: Blacklist::empty(),
+            entropy_exclude_patterns: Vec::new(),
+            custom_patterns: Vec::new(),
+            config_errors: Vec::new(),
+        }
+    }
 }
 
 pub struct Allowlist {
@@ -212,58 +221,171 @@ impl Blacklist {
     }
 }
 
+/// Path of the config file: `~/.claude/scrubber.toml`.
+pub fn config_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.join(".claude").join("scrubber.toml"))
+}
+
 /// Load all settings from `~/.claude/scrubber.toml`.
-/// Returns defaults if the file doesn't exist.
+///
+/// Returns defaults if the file doesn't exist. A config that can't be read
+/// or parsed never disables redaction: the problem is logged loudly, recorded
+/// in [`ScrubberSettings::config_errors`], and built-in defaults are used.
 pub fn load_config() -> Result<ScrubberSettings> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return Ok(ScrubberSettings {
-            allowlist: Allowlist::empty(),
-            blacklist: Blacklist::empty(),
-            entropy_exclude_patterns: Vec::new(),
-            custom_patterns: Vec::new(),
-        });
-    };
-    let path = home.join(".claude").join("scrubber.toml");
-    let data = match std::fs::read_to_string(&path) {
+    Ok(config_path().map_or_else(ScrubberSettings::defaults, |p| load_config_from(&p)))
+}
+
+/// Load settings from an explicit path. See [`load_config`].
+pub fn load_config_from(path: &Path) -> ScrubberSettings {
+    let data = match std::fs::read_to_string(path) {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ScrubberSettings {
-                allowlist: Allowlist::empty(),
-                blacklist: Blacklist::empty(),
-                entropy_exclude_patterns: Vec::new(),
-                custom_patterns: Vec::new(),
-            });
+            return ScrubberSettings::defaults();
         }
-        Err(e) => return Err(e).context(format!("reading {}", path.display())),
+        Err(e) => {
+            let msg = format!("could not read {}: {}", path.display(), e.kind());
+            return fallback_to_defaults(msg);
+        }
     };
-    let config: Config = toml::from_str(&data).context(format!("parsing {}", path.display()))?;
-    let hashes: HashSet<String> = config
-        .allowlist
+    parse_config(&data, path)
+}
+
+fn fallback_to_defaults(msg: String) -> ScrubberSettings {
+    error!(
+        problem = %msg,
+        "scrubber.toml is unusable; FALLING BACK to built-in patterns and default settings. \
+         Your custom patterns, blacklist and allowlist are NOT being applied until it is fixed"
+    );
+    let mut settings = ScrubberSettings::defaults();
+    settings.config_errors.push(msg);
+    settings
+}
+
+/// Describe a TOML syntax error by location and message only. The `Display`
+/// impl of `toml::de::Error` quotes the offending source line, which may
+/// contain a blacklisted secret, so it must never be logged.
+pub fn describe_toml_error(
+    data: &str,
+    message: &str,
+    span: Option<std::ops::Range<usize>>,
+) -> String {
+    match span {
+        Some(span) => {
+            let (line, col) = line_col(data, span.start);
+            format!("TOML syntax error at line {line}, column {col}: {message}")
+        }
+        None => format!("TOML syntax error: {message}"),
+    }
+}
+
+fn line_col(data: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(data.len());
+    let before = data.get(..offset).unwrap_or(data);
+    let line = before.matches('\n').count() + 1;
+    let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+    (line, col)
+}
+
+/// Deserialize one top-level section. On failure the section falls back to its
+/// default and a sanitized error is recorded (serde messages can echo values).
+fn parse_section<T: serde::de::DeserializeOwned + Default>(
+    table: &toml::Table,
+    name: &str,
+    errors: &mut Vec<String>,
+) -> T {
+    let Some(value) = table.get(name) else {
+        return T::default();
+    };
+    if let Ok(v) = value.clone().try_into::<T>() {
+        v
+    } else {
+        let msg = format!("[{name}] section has the wrong shape and was ignored");
+        error!(section = name, "invalid scrubber.toml section, ignoring it");
+        errors.push(msg);
+        T::default()
+    }
+}
+
+fn parse_custom_patterns(
+    table: &toml::Table,
+    errors: &mut Vec<String>,
+) -> Vec<CustomPatternConfig> {
+    let Some(value) = table.get("patterns") else {
+        return Vec::new();
+    };
+    let Some(arr) = value.as_array() else {
+        let msg = "`patterns` must be an array of tables ([[patterns]]); ignored".to_string();
+        error!("{msg}");
+        errors.push(msg);
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (index, v) in arr.iter().enumerate() {
+        if let Ok(p) = v.clone().try_into::<CustomPatternConfig>() {
+            out.push(p);
+        } else {
+            let name = v
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("<unnamed>");
+            let msg = format!(
+                "custom pattern #{} ('{name}') is malformed (needs `name` and `regex` strings); skipped",
+                index + 1
+            );
+            warn!(index, pattern = name, "malformed custom pattern, skipping");
+            errors.push(msg);
+        }
+    }
+    out
+}
+
+fn parse_config(data: &str, path: &Path) -> ScrubberSettings {
+    let table: toml::Table = match toml::from_str(data) {
+        Ok(t) => t,
+        Err(e) => {
+            let msg = format!(
+                "{}: {}",
+                path.display(),
+                describe_toml_error(data, e.message(), e.span())
+            );
+            return fallback_to_defaults(msg);
+        }
+    };
+    let mut config_errors = Vec::new();
+    let allowlist: AllowlistConfig = parse_section(&table, "allowlist", &mut config_errors);
+    let entropy: EntropyTomlConfig = parse_section(&table, "entropy", &mut config_errors);
+    let blacklist: BlacklistConfig = parse_section(&table, "blacklist", &mut config_errors);
+    let custom_patterns = parse_custom_patterns(&table, &mut config_errors);
+
+    let hashes: HashSet<String> = allowlist
         .hashes
         .into_iter()
         .map(|h| h.to_lowercase())
         .collect();
     debug!(count = hashes.len(), "loaded allowlist hashes");
-    if !config.entropy.exclude_patterns.is_empty() {
+    if !entropy.exclude_patterns.is_empty() {
         debug!(
-            count = config.entropy.exclude_patterns.len(),
+            count = entropy.exclude_patterns.len(),
             "loaded entropy exclude patterns"
         );
     }
 
     // Build blacklist: filter short entries, deduplicate, sort longest-first
-    let min_len = config
-        .blacklist
+    let min_len = blacklist
         .min_string_length
         .unwrap_or(DEFAULT_MIN_BLACKLIST_ENTRY_LEN);
     let mut bl_entries: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
-    for s in config.blacklist.strings {
+    for (index, s) in blacklist.strings.into_iter().enumerate() {
         if s.len() < min_len {
+            // Never log the entry itself: it is a secret.
             warn!(
-                entry = %s,
+                index,
+                len = s.len(),
                 min_len,
-                "blacklist entry too short, ignoring"
+                "blacklist.strings entry too short, ignoring"
             );
             continue;
         }
@@ -276,8 +398,7 @@ pub fn load_config() -> Result<ScrubberSettings> {
         debug!(count = bl_entries.len(), "loaded blacklist string entries");
     }
 
-    let bl_hashes: HashSet<String> = config
-        .blacklist
+    let bl_hashes: HashSet<String> = blacklist
         .hashes
         .into_iter()
         .map(|h| h.to_lowercase())
@@ -286,15 +407,44 @@ pub fn load_config() -> Result<ScrubberSettings> {
         debug!(count = bl_hashes.len(), "loaded blacklist hashes");
     }
 
-    Ok(ScrubberSettings {
+    ScrubberSettings {
         allowlist: Allowlist { hashes },
         blacklist: Blacklist {
             entries: bl_entries,
             hashes: bl_hashes,
         },
-        entropy_exclude_patterns: config.entropy.exclude_patterns,
-        custom_patterns: config.patterns,
-    })
+        entropy_exclude_patterns: entropy.exclude_patterns,
+        custom_patterns,
+        config_errors,
+    }
+}
+
+/// Compile a user-defined pattern, validating it for use in a `PatternSet`.
+///
+/// The error string never contains the regex source (a custom pattern may
+/// embed a literal secret), only the kind of problem.
+pub fn compile_custom_pattern(c: &CustomPatternConfig) -> std::result::Result<Regex, String> {
+    let regex = RegexBuilder::new(&c.regex)
+        .size_limit(CUSTOM_PATTERN_SIZE_LIMIT)
+        .build()
+        .map_err(|e| match e {
+            regex::Error::CompiledTooBig(limit) => {
+                format!("regex is too large (compiled size exceeds {limit} bytes)")
+            }
+            _ => "invalid regex syntax".to_string(),
+        })?;
+    if regex.is_match("") {
+        return Err("regex matches the empty string".to_string());
+    }
+    if let Some(group) = c.secret_group
+        && group >= regex.captures_len()
+    {
+        return Err(format!(
+            "secret_group {group} does not exist (regex has {} capture group(s))",
+            regex.captures_len() - 1
+        ));
+    }
+    Ok(regex)
 }
 
 /// Compute the lowercase hex SHA-256 digest of a string.
@@ -305,7 +455,7 @@ pub fn sha256_hex(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -353,22 +503,159 @@ mod tests {
         assert_eq!(bl.len(), 0);
     }
 
-    #[test]
-    fn blacklist_short_strings_filtered_in_config() {
-        // Simulate what load_config does
-        let short = "abc";
-        assert!(short.len() < DEFAULT_MIN_BLACKLIST_ENTRY_LEN);
-        // from_strings is for tests and doesn't filter, but load_config does
-        // Test the filtering logic directly
-        let strings = vec!["short".to_string(), "this-is-long-enough".to_string()];
-        let mut entries = Vec::new();
-        for s in strings {
-            if s.len() >= DEFAULT_MIN_BLACKLIST_ENTRY_LEN {
-                entries.push(s);
+    /// Capture everything logged (at any level) while running `f`.
+    pub(crate) fn capture_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
             }
         }
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0], "this-is-long-enough");
+        let buf = Buf::default();
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let r = tracing::subscriber::with_default(subscriber, f);
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        (r, out)
+    }
+
+    #[test]
+    fn short_blacklist_entry_warning_does_not_print_the_entry() {
+        let toml = r#"
+[blacklist]
+strings = ["pw-7Qx", "this-is-long-enough"]
+"#;
+        let (settings, logs) = capture_logs(|| parse_config(toml, Path::new("scrubber.toml")));
+        assert_eq!(settings.blacklist.len(), 1);
+        assert!(settings.blacklist.contains_any("x this-is-long-enough y"));
+        assert!(logs.contains("too short"), "expected a warning: {logs}");
+        assert!(logs.contains("index=0"), "{logs}");
+        assert!(logs.contains("len=6"), "{logs}");
+        assert!(!logs.contains("pw-7Qx"), "secret leaked into logs: {logs}");
+    }
+
+    #[test]
+    fn toml_syntax_error_falls_back_to_defaults_without_echoing_config() {
+        let toml = "[blacklist]\nstrings = [\"hunter2-hunter2-secret\"\n[allowlist\n";
+        let (settings, logs) = capture_logs(|| parse_config(toml, Path::new("scrubber.toml")));
+        assert!(settings.blacklist.is_empty());
+        assert!(settings.custom_patterns.is_empty());
+        assert_eq!(settings.config_errors.len(), 1);
+        let err = &settings.config_errors[0];
+        assert!(err.contains("line"), "{err}");
+        assert!(!err.contains("hunter2"), "secret leaked into error: {err}");
+        assert!(logs.contains("FALLING BACK"), "{logs}");
+        assert!(!logs.contains("hunter2"), "secret leaked into logs: {logs}");
+    }
+
+    #[test]
+    fn unreadable_or_missing_config_uses_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = load_config_from(&dir.path().join("missing.toml"));
+        assert!(settings.config_errors.is_empty());
+        // A directory where the file should be -> read error -> fallback
+        let settings = load_config_from(dir.path());
+        assert_eq!(settings.config_errors.len(), 1);
+    }
+
+    #[test]
+    fn bad_section_does_not_discard_other_sections() {
+        let toml = r#"
+entropy = "not-a-table"
+
+[blacklist]
+strings = ["this-is-long-enough"]
+min_string_length = "eight-chars-secret"
+
+[allowlist]
+hashes = ["ABC"]
+"#;
+        let (settings, logs) = capture_logs(|| parse_config(toml, Path::new("scrubber.toml")));
+        // blacklist had a bad key -> whole section ignored, but allowlist loads
+        assert_eq!(settings.allowlist.len(), 1);
+        assert_eq!(settings.config_errors.len(), 2);
+        assert!(
+            settings
+                .config_errors
+                .iter()
+                .any(|e| e.contains("[entropy]"))
+        );
+        assert!(
+            settings
+                .config_errors
+                .iter()
+                .any(|e| e.contains("[blacklist]"))
+        );
+        assert!(!logs.contains("eight-chars-secret"), "{logs}");
+    }
+
+    #[test]
+    fn malformed_custom_pattern_is_skipped_others_kept() {
+        let toml = r#"
+[[patterns]]
+name = "good"
+regex = "itk_[a-z]{8}"
+
+[[patterns]]
+name = "no-regex"
+
+[[patterns]]
+name = "good2"
+regex = "itk2_[a-z]{8}"
+"#;
+        let settings = parse_config(toml, Path::new("scrubber.toml"));
+        let names: Vec<_> = settings
+            .custom_patterns
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["good", "good2"]);
+        assert_eq!(settings.config_errors.len(), 1);
+        assert!(settings.config_errors[0].contains("no-regex"));
+    }
+
+    fn custom(regex: &str, secret_group: Option<usize>) -> CustomPatternConfig {
+        CustomPatternConfig {
+            name: "p".into(),
+            regex: regex.into(),
+            keywords: Vec::new(),
+            secret_group,
+        }
+    }
+
+    #[test]
+    fn compile_custom_pattern_errors_never_echo_the_regex() {
+        let err = compile_custom_pattern(&custom("literal-s3cret-value(", None)).unwrap_err();
+        assert_eq!(err, "invalid regex syntax");
+        assert!(!err.contains("s3cret"));
+
+        let err = compile_custom_pattern(&custom(r"\w{5000}\w{5000}", None)).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+
+        let err = compile_custom_pattern(&custom("a*", None)).unwrap_err();
+        assert!(err.contains("empty string"));
+
+        let err = compile_custom_pattern(&custom("k=(v+)", Some(2))).unwrap_err();
+        assert!(err.contains("secret_group"));
+
+        assert!(compile_custom_pattern(&custom("k=(v+)", Some(1))).is_ok());
+    }
+
+    #[test]
+    fn line_col_counts_from_one() {
+        assert_eq!(line_col("ab\ncd", 0), (1, 1));
+        assert_eq!(line_col("ab\ncd", 4), (2, 2));
+        assert_eq!(line_col("ab", 99), (1, 3));
     }
 
     #[test]

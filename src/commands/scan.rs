@@ -231,40 +231,162 @@ pub(crate) fn run_scan(
     }
 }
 
+/// Printed to stderr once, before the first full secret, under `--no-truncate`.
+const NO_TRUNCATE_WARNING: &str = "WARNING: --no-truncate prints FULL SECRET VALUES to your terminal. \
+If this runs inside Claude Code (or anything else that records output), those secrets \
+will be written to a NEW transcript. Only use it in a plain terminal and clear the scrollback afterwards.";
+
 #[allow(clippy::print_stderr)] // intentional user-facing dry-run output
 fn print_unified_diff(path: &Path, diffs: &[LineDiff], no_truncate: bool) {
     use colored::Colorize;
+    static WARNED: std::sync::Once = std::sync::Once::new();
 
-    let path_str = path.display().to_string();
-    eprintln!("  {}", path_str.bold());
+    if no_truncate {
+        WARNED.call_once(|| eprintln!("{}", NO_TRUNCATE_WARNING.red().bold()));
+    }
+
+    for line in diff_lines(path, diffs, no_truncate) {
+        eprintln!("{line}");
+    }
+}
+
+/// Render the dry-run report for one file. Without `no_truncate` this shows
+/// only the file, line, pattern name and secret length (see [`secret_preview`]).
+fn diff_lines(path: &Path, diffs: &[LineDiff], no_truncate: bool) -> Vec<String> {
+    use colored::Colorize;
+
+    let mut out = vec![format!("  {}", path.display().to_string().bold())];
     for diff in diffs {
         for r in &diff.redactions {
             let preview = if no_truncate {
                 r.matched_text.replace('\n', "\\n").replace('\r', "\\r")
             } else {
-                truncate_secret(&r.matched_text, 40)
+                secret_preview(&r.matched_text)
             };
             let redacted = format!("[REDACTED:{}]", r.pattern_name);
-            eprintln!(
+            out.push(format!(
                 "    L{}: {} → {}",
                 diff.line_number,
                 preview.red(),
                 redacted.green(),
-            );
+            ));
         }
     }
+    out
 }
 
-/// Show the first `max_len` chars, masking the middle portion to avoid
-/// printing full secrets to the terminal while still being identifiable.
-pub(crate) fn truncate_secret(s: &str, max_len: usize) -> String {
-    let s = s.replace('\n', "\\n").replace('\r', "\\r");
-    if s.len() <= max_len {
-        let visible = s.len().min(8);
-        format!("{}...{}", &s[..visible], &s[s.len().saturating_sub(4)..])
-    } else {
-        let prefix = &s[..8.min(s.len())];
-        let suffix = &s[s.len().saturating_sub(4)..];
-        format!("{prefix}...{suffix}")
+/// Minimum length (in chars) before any part of a secret is shown.
+const PREVIEW_MIN_CHARS: usize = 20;
+/// Number of leading chars shown for long secrets.
+const PREVIEW_PREFIX_CHARS: usize = 4;
+
+/// Describe a matched secret without revealing it.
+///
+/// Dry-run output is often captured into a new Claude Code transcript, so this
+/// must never print a recoverable secret: secrets shorter than
+/// [`PREVIEW_MIN_CHARS`] chars show only their length; longer ones show at most
+/// a [`PREVIEW_PREFIX_CHARS`]-char prefix (enough to recognise e.g. `ghp_`).
+/// Cuts on `char_indices`, so non-ASCII input never panics.
+pub(crate) fn secret_preview(s: &str) -> String {
+    let len = s.chars().count();
+    if len < PREVIEW_MIN_CHARS {
+        return format!("<{len} chars>");
+    }
+    let cut = s
+        .char_indices()
+        .nth(PREVIEW_PREFIX_CHARS)
+        .map_or(s.len(), |(i, _)| i);
+    let prefix: String = s[..cut]
+        .chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    format!("{prefix}… <{len} chars>")
+}
+
+/// Legacy name kept for existing callers (hook/scan debug logging). Now
+/// identical to [`secret_preview`]; `_max_len` is ignored.
+pub(crate) fn truncate_secret(s: &str, _max_len: usize) -> String {
+    secret_preview(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_secrets_show_only_length() {
+        for s in ["", "a", "abcd1234", "abcd1234efgh", "0123456789abcdefghi"] {
+            assert_eq!(secret_preview(s), format!("<{} chars>", s.chars().count()));
+        }
+    }
+
+    #[test]
+    fn long_secrets_show_at_most_four_char_prefix() {
+        let secret = "sk_fake_0123456789abcdefWXYZ";
+        let p = secret_preview(secret);
+        assert_eq!(p, format!("sk_f… <{} chars>", secret.len()));
+        assert!(!p.contains("WXYZ"), "suffix must not be shown");
+    }
+
+    #[test]
+    fn non_ascii_does_not_panic() {
+        // Multi-byte chars straddling the old byte-slice boundaries (8, len-4).
+        assert!(secret_preview("pässwörd-ünïcödé-sëcrét-välüé").starts_with("päss…"));
+        assert_eq!(secret_preview("日本語の秘密"), "<6 chars>");
+        let long = "\u{1f511}".repeat(25);
+        assert_eq!(
+            secret_preview(&long),
+            format!("{}… <25 chars>", "\u{1f511}".repeat(4))
+        );
+        // Legacy wrapper used by the hook's debug logging is safe too.
+        assert_eq!(truncate_secret("ñññññññññññ", 40), "<11 chars>");
+    }
+
+    #[test]
+    fn dry_run_report_never_contains_short_or_medium_secrets() {
+        use scrub_history::scrubber::Redaction;
+        colored::control::set_override(false);
+        let short = "pw-12chars!!"; // 12 bytes: old code printed it in full
+        let long = "tok_fake_ABCDEFGHIJKLMNOP_tail";
+        let diffs = vec![LineDiff {
+            line_number: 7,
+            redactions: vec![
+                Redaction {
+                    pattern_name: "blacklist".into(),
+                    start: 0,
+                    end: short.len(),
+                    matched_text: short.into(),
+                },
+                Redaction {
+                    pattern_name: "generic".into(),
+                    start: 0,
+                    end: long.len(),
+                    matched_text: long.into(),
+                },
+            ],
+        }];
+        let text = diff_lines(Path::new("/x/s.jsonl"), &diffs, false).join("\n");
+        assert!(text.contains("/x/s.jsonl"));
+        assert!(
+            text.contains("L7: <12 chars> → [REDACTED:blacklist]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("tok_… <30 chars> → [REDACTED:generic]"),
+            "{text}"
+        );
+        assert!(!text.contains(short) && !text.contains("tail"), "{text}");
+
+        // --no-truncate shows full values (warning is printed separately).
+        let full = diff_lines(Path::new("/x/s.jsonl"), &diffs, true).join("\n");
+        assert!(full.contains(short) && full.contains(long));
+        assert!(NO_TRUNCATE_WARNING.contains("FULL SECRET VALUES"));
+    }
+
+    #[test]
+    fn control_chars_are_not_emitted() {
+        let p = secret_preview("a\nbcdefghijklmnopqrstuvwxyz");
+        assert!(!p.contains('\n'));
+        assert!(p.starts_with("a?bc"));
     }
 }
