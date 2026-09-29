@@ -420,7 +420,7 @@ fn normalize_key(key: &str) -> String {
     out
 }
 
-fn is_sensitive_key(key: &str) -> bool {
+pub(crate) fn is_sensitive_key(key: &str) -> bool {
     let norm = normalize_key(key);
     SENSITIVE_KEYS.iter().any(|&k| {
         norm == k
@@ -432,10 +432,53 @@ fn is_sensitive_key(key: &str) -> bool {
 
 /// Opaque fields that must survive byte-for-byte (resume verifies them, and
 /// base64 image data would be corrupted by entropy hits).
-fn is_opaque_field(obj_type: Option<&str>, key: &str) -> bool {
+pub(crate) fn is_opaque_field(obj_type: Option<&str>, key: &str) -> bool {
     key == "signature"
         || (obj_type == Some("redacted_thinking") && key == "data")
         || (obj_type == Some("image") && matches!(key, "source" | "file" | "data"))
+}
+
+/// Scrub one JSON string value; `force_redact` means a sensitive key sits
+/// above it. Borrows the input when nothing was redacted.
+pub(crate) fn scrub_string<'a>(
+    s: &'a str,
+    ps: &PatternSet,
+    ec: &EntropyConfig,
+    al: &Allowlist,
+    bl: &Blacklist,
+    force_redact: bool,
+) -> (Cow<'a, str>, Vec<Redaction>) {
+    // Key-value awareness: if the parent key was sensitive and the
+    // value is long enough, redact the whole thing unconditionally.
+    if force_redact && s.len() >= SENSITIVE_KEY_MIN_VALUE_LEN {
+        if al.is_allowed(s) || REDACTED_PLACEHOLDER_RE.is_match(s) {
+            return (Cow::Borrowed(s), Vec::new());
+        }
+        let redaction = Redaction {
+            pattern_name: "sensitive-field".to_string(),
+            start: 0,
+            end: s.len(),
+            matched_text: s.to_string(),
+        };
+        return (
+            Cow::Owned("[REDACTED:sensitive-field]".to_string()),
+            vec![redaction],
+        );
+    }
+    // Hash-based blacklist: redact the whole string if its hash matches
+    if bl.is_hash_match(s) && !al.is_allowed(s) {
+        let redaction = Redaction {
+            pattern_name: "blacklist".to_string(),
+            start: 0,
+            end: s.len(),
+            matched_text: s.to_string(),
+        };
+        return (
+            Cow::Owned("[REDACTED:blacklist]".to_string()),
+            vec![redaction],
+        );
+    }
+    scrub_text(s, ps, ec, al, bl)
 }
 
 /// Recursively scrub all string values in a JSON value tree.
@@ -459,35 +502,13 @@ fn scrub_all_strings_inner(
 ) -> Vec<Redaction> {
     match value {
         Value::String(s) => {
-            // Key-value awareness: if the parent key was sensitive and the
-            // value is long enough, redact the whole thing unconditionally.
-            if force_redact && s.len() >= SENSITIVE_KEY_MIN_VALUE_LEN {
-                if al.is_allowed(s) || REDACTED_PLACEHOLDER_RE.is_match(s) {
-                    return Vec::new();
-                }
-                let redaction = Redaction {
-                    pattern_name: "sensitive-field".to_string(),
-                    start: 0,
-                    end: s.len(),
-                    matched_text: s.clone(),
-                };
-                *s = "[REDACTED:sensitive-field]".to_string();
-                return vec![redaction];
-            }
-            // Hash-based blacklist: redact the whole string if its hash matches
-            if bl.is_hash_match(s) && !al.is_allowed(s) {
-                let redaction = Redaction {
-                    pattern_name: "blacklist".to_string(),
-                    start: 0,
-                    end: s.len(),
-                    matched_text: s.clone(),
-                };
-                *s = "[REDACTED:blacklist]".to_string();
-                return vec![redaction];
-            }
-            let (scrubbed, redactions) = scrub_text(s, ps, ec, al, bl);
-            if let Cow::Owned(scrubbed) = scrubbed {
-                *s = scrubbed;
+            let (scrubbed, redactions) = scrub_string(s, ps, ec, al, bl, force_redact);
+            let replacement = match scrubbed {
+                Cow::Owned(out) => Some(out),
+                Cow::Borrowed(_) => None,
+            };
+            if let Some(out) = replacement {
+                *s = out;
             }
             redactions
         }

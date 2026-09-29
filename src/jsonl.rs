@@ -326,6 +326,17 @@ impl LineState<'_> {
         if text.trim().is_empty() {
             return Ok(None);
         }
+        // Nearly every line is clean: confirm that without building a
+        // `Value` tree. Anything else takes the full path below.
+        if message::is_clean(
+            text,
+            ctx.pattern_set,
+            ctx.entropy_cfg,
+            ctx.allowlist,
+            ctx.blacklist,
+        ) {
+            return Ok(None);
+        }
 
         let (redactions, output) = if let Ok(mut value) = serde_json::from_str::<Value>(text) {
             let redactions = message::scrub_value(
