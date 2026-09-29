@@ -35,6 +35,19 @@ pub fn format_epoch(epoch: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02} UTC")
 }
 
+/// Format a unix epoch timestamp as a filename-safe UTC string
+/// (`YYYYMMDD-HHMMSS`), e.g. for backup file suffixes.
+pub fn format_epoch_compact(epoch: u64) -> String {
+    let (year, month, day) = days_to_date(epoch / 86400);
+    let tod = epoch % 86400;
+    format!(
+        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
 /// Convert days since Unix epoch to (year, month, day).
 fn days_to_date(days: u64) -> (u64, u64, u64) {
     // Algorithm from Howard Hinnant's civil_from_days
@@ -165,6 +178,14 @@ mod tests {
     fn format_epoch_known_date() {
         // 2024-01-01 00:00:00 UTC = 1704067200
         assert_eq!(format_epoch(1_704_067_200), "2024-01-01 00:00:00 UTC");
+    }
+
+    #[test]
+    fn format_epoch_compact_is_filename_safe() {
+        assert_eq!(
+            format_epoch_compact(1_704_067_200 + 3661),
+            "20240101-010101"
+        );
     }
 
     #[test]
