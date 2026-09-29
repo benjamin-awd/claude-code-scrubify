@@ -114,31 +114,55 @@ static TOKEN_BYTES: [bool; 256] = {
 /// `(start, end)` of every maximal run of token bytes at least
 /// `TOKEN_MIN_LEN` long: the same spans `[A-Za-z0-9+/=_-]{20,}` finds, without
 /// the regex engine's forward-then-reverse search per match.
+///
+/// Skips ahead like Boyer-Moore: a qualifying run starting in
+/// `i..i + TOKEN_MIN_LEN` must cover byte `i + TOKEN_MIN_LEN - 1`, so when
+/// that byte is not a token byte the whole window is skipped. Prose is
+/// scanned at roughly one byte in twenty.
 fn candidate_tokens(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
     let b = text.as_bytes();
+    let is_tok = |i: usize| TOKEN_BYTES[b[i] as usize];
+    // Invariant: `i == 0` or `b[i - 1]` is not a token byte.
     let mut i = 0;
     std::iter::from_fn(move || {
-        while i < b.len() {
-            if !TOKEN_BYTES[b[i] as usize] {
-                i += 1;
+        while i + TOKEN_MIN_LEN <= b.len() {
+            let probe = i + TOKEN_MIN_LEN - 1;
+            if !is_tok(probe) {
+                i = probe + 1;
                 continue;
             }
-            let start = i;
-            while i < b.len() && TOKEN_BYTES[b[i] as usize] {
-                i += 1;
+            let mut start = probe;
+            while start > i && is_tok(start - 1) {
+                start -= 1;
             }
-            if i - start >= TOKEN_MIN_LEN {
-                return Some((start, i));
+            let mut end = probe + 1;
+            while end < b.len() && is_tok(end) {
+                end += 1;
+            }
+            // `b[end]` (if any) is not a token byte, so skip past it too.
+            i = end + 1;
+            if end - start >= TOKEN_MIN_LEN {
+                return Some((start, end));
             }
         }
         None
     })
 }
 
+/// `C_LOG2_C[c] = c * log2(c)` for the per-byte counts of typical tokens.
+static C_LOG2_C: LazyLock<[f64; 256]> = LazyLock::new(|| {
+    let mut t = [0.0; 256];
+    for (c, v) in t.iter_mut().enumerate().skip(1) {
+        #[allow(clippy::cast_precision_loss)]
+        let c = c as f64;
+        *v = c * c.log2();
+    }
+    t
+});
+
 pub fn shannon_entropy(s: &str) -> f64 {
-    #[allow(clippy::cast_precision_loss)] // precision loss irrelevant for entropy calc
-    let len = s.len() as f64;
-    if len == 0.0 {
+    let n = s.len();
+    if n == 0 {
         return 0.0;
     }
 
@@ -147,14 +171,22 @@ pub fn shannon_entropy(s: &str) -> f64 {
         counts[b as usize] += 1;
     }
 
-    counts
+    // H = -sum(p * log2 p) = log2 n - sum(c * log2 c) / n, so only one
+    // log2 per call: the c * log2 c terms come from a table.
+    let table = &*C_LOG2_C;
+    let sum: f64 = counts
         .iter()
         .filter(|&&c| c > 0)
         .map(|&c| {
-            let freq = f64::from(c) / len;
-            -freq * freq.log2()
+            table
+                .get(c as usize)
+                .copied()
+                .unwrap_or_else(|| f64::from(c) * f64::from(c).log2())
         })
-        .sum()
+        .sum();
+    #[allow(clippy::cast_precision_loss)] // precision loss irrelevant for entropy calc
+    let n = n as f64;
+    (n.log2() - sum / n).max(0.0)
 }
 
 /// Entropy a base62/base64 token of `len` chars must reach:
@@ -454,6 +486,58 @@ mod tests {
         );
     }
 
+    /// Strings of token runs of every length around the 20-byte cut-off,
+    /// split by ASCII and multi-byte separators.
+    fn mixed_runs() -> Vec<String> {
+        let mut seed = 0x9E37_79B9_u32;
+        let mut next = move |m: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % m
+        };
+        (0..300)
+            .map(|_| {
+                let mut s = String::new();
+                for _ in 0..next(12) {
+                    let run = next(45) as usize;
+                    s.extend((0..run).map(|k| char::from(b"aZ3+/=_-q"[k % 9])));
+                    s.push_str([" ", "\n", "→", "\"", ".", ""][next(6) as usize]);
+                }
+                s
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shannon_entropy_matches_definition() {
+        let reference = |s: &str| {
+            let mut counts = [0u32; 256];
+            for &b in s.as_bytes() {
+                counts[b as usize] += 1;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let len = s.len() as f64;
+            counts
+                .iter()
+                .filter(|&&c| c > 0)
+                .map(|&c| {
+                    let p = f64::from(c) / len;
+                    -p * p.log2()
+                })
+                .sum::<f64>()
+        };
+        let long = "ab".repeat(400);
+        for s in [
+            "a",
+            "aaaaaaaaaaaaaaaaaaaaaa",
+            "aB3kL9mN2pQ5rT8vX1yZ4cF7gH0jK6wE",
+            long.as_str(),
+        ] {
+            assert!((shannon_entropy(s) - reference(s)).abs() < 1e-9, "{s}");
+        }
+    }
+
     #[test]
     fn candidate_tokens_match_token_regex() {
         let re = Regex::new(r"[A-Za-z0-9+/=_\-]{20,}").unwrap();
@@ -466,7 +550,12 @@ mod tests {
             "é→aB3kL9mN2pQ5rT8vX1yZ4cF7—gH0jK6wEaB3kL9mN2pQ5rT8vX1yZ4cF7—",
             "0123456789012345678 01234567890123456789 ",
             long.as_str(),
-        ] {
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(mixed_runs())
+        {
+            let text = text.as_str();
             let expected: Vec<_> = re.find_iter(text).map(|m| (m.start(), m.end())).collect();
             assert_eq!(
                 candidate_tokens(text).collect::<Vec<_>>(),
