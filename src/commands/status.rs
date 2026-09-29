@@ -7,25 +7,43 @@ use colored::Colorize;
 use scrub_history::allowlist::{self, ScrubberSettings};
 use scrub_history::display;
 use scrub_history::fsutil;
-use scrub_history::locations::{self, Location};
+use scrub_history::locations::{self, Discovery, Location};
 use scrub_history::patterns::PatternSet;
-use scrub_history::stats;
+use scrub_history::stats::{self, PersistentStats, ScanRunStats};
 
 use super::init::{HOOK_EVENTS, find_installed_hook, hook_command_is_absolute};
 
+/// Detail views gated behind `scrub-history status <section>`.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum StatusSection {
+    /// Per-event hook install state and mode
+    Hooks,
+    /// Per-location breakdown of the last scan and on-disk coverage
+    Scan,
+}
+
 #[allow(clippy::print_stdout, clippy::print_stderr)]
-pub(crate) fn run_status() {
-    if let Err(e) = run_status_inner() {
+pub(crate) fn run_status(section: Option<StatusSection>, all: bool) {
+    if let Err(e) = run_status_inner(section, all) {
         eprintln!("error: {e:#}");
     }
 }
 
-#[allow(clippy::print_stdout, clippy::cast_precision_loss)]
-fn run_status_inner() -> Result<()> {
+#[allow(clippy::print_stdout)]
+fn run_status_inner(section: Option<StatusSection>, all: bool) -> Result<()> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
     let claude_dir = home.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+    let discover = || {
+        locations::discover(
+            &claude_dir,
+            &home.join(".claude.json"),
+            &locations::LocationSet::all(),
+            std::time::SystemTime::now(),
+        )
+    };
 
     // Header
     println!(
@@ -34,12 +52,56 @@ fn run_status_inner() -> Result<()> {
         format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
     );
 
-    // ── Hook Configuration ──────────────────────────
-    display::section("Hook Configuration");
+    let persistent = stats::load().unwrap_or_default();
 
-    let settings_path = claude_dir.join("settings.json");
-    for (key, value) in hook_report(&settings_path) {
-        display::kv(&key, value);
+    match section {
+        Some(StatusSection::Hooks) => print_hooks_detail(&settings_path),
+        Some(StatusSection::Scan) => {
+            print_scan_detail(persistent.last_scan.as_ref(), &discover());
+        }
+        None => {
+            print_overview(&claude_dir, &settings_path, &persistent, all);
+            if all {
+                print_scan_detail(persistent.last_scan.as_ref(), &discover());
+            } else {
+                println!(
+                    "\n  {}",
+                    "More: `scrub-history status hooks`, `status scan`, or `status --all`".dimmed()
+                );
+            }
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+#[allow(clippy::print_stdout, clippy::cast_precision_loss)]
+fn print_overview(
+    claude_dir: &Path,
+    settings_path: &Path,
+    persistent: &PersistentStats,
+    all: bool,
+) {
+    // ── Hooks ───────────────────────────────────────
+    // Collapsed to one line when every hook is healthy; any problem expands it.
+    let (rows, healthy) = hook_report(settings_path);
+    if healthy && !all {
+        display::section("Hooks");
+        display::kv(
+            "Installed",
+            format!(
+                "{}/{} {}",
+                HOOK_EVENTS.len(),
+                HOOK_EVENTS.len(),
+                format!("({})", HOOK_EVENTS.join(", ")).dimmed()
+            ),
+        );
+    } else {
+        display::section("Hook Configuration");
+        for (key, value) in rows {
+            display::kv(&key, value);
+        }
     }
 
     // ── Config ──────────────────────────────────────
@@ -107,8 +169,6 @@ fn run_status_inner() -> Result<()> {
         display::kv("Blacklist", "empty".dimmed());
     }
 
-    let persistent = stats::load().unwrap_or_default();
-
     // ── Recent Redactions ───────────────────────────
     display::section("Recent Redactions");
     let redaction_runs: Vec<&stats::HookRunStats> = persistent
@@ -152,7 +212,7 @@ fn run_status_inner() -> Result<()> {
     display::section("Stats");
     if let Some(ref hook) = persistent.last_hook {
         display::kv(
-            "Last run",
+            "Last hook run",
             format!(
                 "{} ({})",
                 display::format_epoch(hook.timestamp_epoch),
@@ -203,112 +263,113 @@ fn run_status_inner() -> Result<()> {
         display::empty("No hook runs recorded yet");
     }
 
-    // ── Last Scan Run ───────────────────────────────
-    display::section("Last Scan Run");
-    if let Some(ref scan) = persistent.last_scan {
+    // ── Last Scan ───────────────────────────────────
+    display::section("Last Scan");
+    if let Some(scan) = &persistent.last_scan {
         display::kv(
             "When",
             format!(
-                "{} ({})",
+                "{} ({}) · {}",
                 display::format_epoch(scan.timestamp_epoch),
                 display::format_relative(scan.timestamp_epoch),
+                if scan.dry_run { "dry-run" } else { "live" },
             ),
         );
-        display::kv("Mode", if scan.dry_run { "dry-run" } else { "live" });
+        let mut files = format!("{} scanned", scan.files_scanned);
         if scan.files_cached > 0 {
-            display::kv(
-                "Files",
-                format!(
-                    "{} scanned, {} cached, {} modified",
-                    scan.files_scanned, scan.files_cached, scan.files_modified
-                ),
-            );
-        } else {
-            display::kv(
-                "Files",
-                format!(
-                    "{} scanned, {} modified",
-                    scan.files_scanned, scan.files_modified
-                ),
-            );
+            let _ = write!(files, ", {} cached", scan.files_cached);
         }
+        let _ = write!(
+            files,
+            ", {} {}",
+            scan.files_modified,
+            if scan.dry_run {
+                "would change"
+            } else {
+                "modified"
+            }
+        );
+        display::kv("Files", files);
         display::kv("Redactions", format!("{}", scan.total_redactions));
-        if scan.errors > 0 {
-            display::kv("Errors", format!("{}", scan.errors).red());
-        } else {
-            display::kv("Errors", "0");
-        }
-        display::kv("Duration", display::format_duration_ms(scan.duration_ms));
+        let mut duration = display::format_duration_ms(scan.duration_ms);
         if scan.files_scanned > 0 {
             let per_file = scan.duration_ms as f64 / scan.files_scanned as f64;
-            display::kv("Throughput", format!("{per_file:.1}ms/file"));
+            let _ = write!(duration, " ({per_file:.1}ms per scanned file)");
         }
-        for (name, loc) in &scan.by_location {
-            let mut line = format!(
-                "{} files, {} scanned, {} modified, {} redactions",
-                loc.files_found, loc.files_scanned, loc.files_modified, loc.redactions
-            );
-            if loc.files_skipped > 0 {
-                let _ = write!(line, ", {} skipped", loc.files_skipped);
-            }
-            if loc.errors > 0 {
-                let _ = write!(line, ", {} errors", loc.errors);
-            }
-            display::kv(&format!("  {name}"), line);
-        }
-        if scan.orphans_found > 0 {
-            display::kv(
-                "Orphan temps",
-                format!(
-                    "{} found, {} removed",
-                    scan.orphans_found, scan.orphans_removed
-                ),
-            );
-        }
-        if scan.config_findings > 0 {
-            display::kv(
-                "~/.claude.json",
-                format!(
-                    "{} secret-looking MCP value(s), not modified (see `scan` output)",
-                    scan.config_findings
-                )
-                .yellow(),
-            );
+        display::kv("Duration", duration);
+        if scan.errors > 0 {
+            display::kv("Errors", format!("{}", scan.errors).red());
         }
     } else {
         display::empty("No scan runs recorded yet");
     }
+}
 
-    // ── Coverage ────────────────────────────────────
-    display::section("Coverage");
-
-    let discovery = locations::discover(
-        &claude_dir,
-        &home.join(".claude.json"),
-        &locations::LocationSet::all(),
-        std::time::SystemTime::now(),
+fn print_hooks_detail(settings_path: &Path) {
+    display::section("Hook Configuration");
+    display::kv(
+        "settings.json",
+        settings_path.display().to_string().dimmed(),
     );
-    if discovery.targets.is_empty() {
+    for (key, value) in hook_report(settings_path).0 {
+        display::kv(&key, value);
+    }
+}
+
+/// One row per location, merging on-disk coverage with the last scan's counts.
+#[allow(clippy::print_stdout)]
+fn print_scan_detail(scan: Option<&ScanRunStats>, discovery: &Discovery) {
+    display::section("Locations");
+
+    let mut per_loc: BTreeMap<Location, (u64, u64)> = BTreeMap::new();
+    for t in &discovery.targets {
+        let e = per_loc.entry(t.location).or_default();
+        e.0 += 1;
+        e.1 += std::fs::metadata(&t.path).map_or(0, |m| m.len());
+    }
+    if per_loc.is_empty() {
         display::empty("No history files found under ~/.claude/");
     } else {
-        let mut per_loc: BTreeMap<Location, (u64, u64)> = BTreeMap::new();
-        for t in &discovery.targets {
-            let e = per_loc.entry(t.location).or_default();
-            e.0 += 1;
-            e.1 += std::fs::metadata(&t.path).map_or(0, |m| m.len());
-        }
+        let header = format!(
+            "{:<18}{:>7}{:>11}{:>9}{:>10}{:>12}",
+            "", "files", "size", "scanned", "modified", "redactions"
+        );
+        println!("  {}", header.dimmed());
+        let cell = |v: Option<u64>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
         let (mut total_files, mut total_bytes) = (0u64, 0u64);
         for (loc, (files, bytes)) in &per_loc {
             total_files += files;
             total_bytes += bytes;
-            display::kv(
+            let last = scan.and_then(|s| s.by_location.get(loc.name()));
+            let mut line = format!(
+                "{:<18}{files:>7}{:>11}{:>9}{:>10}{:>12}",
                 loc.name(),
-                format!("{files} files ({})", display::format_bytes(*bytes)),
+                display::format_bytes(*bytes),
+                cell(last.map(|l| l.files_scanned)),
+                cell(last.map(|l| l.files_modified)),
+                cell(last.map(|l| l.redactions)),
             );
+            if let Some(l) = last {
+                if l.files_skipped > 0 {
+                    let _ = write!(line, "  {} skipped", l.files_skipped);
+                }
+                if l.errors > 0 {
+                    let _ = write!(line, "  {}", format!("{} errors", l.errors).red());
+                }
+            }
+            println!("  {line}");
         }
-        display::kv("History files", format!("{total_files}"));
-        display::kv("Total size", display::format_bytes(total_bytes));
+        println!(
+            "  {}",
+            format!(
+                "{:<18}{total_files:>7}{:>11}",
+                "total",
+                display::format_bytes(total_bytes)
+            )
+            .bold()
+        );
     }
+
     if !discovery.orphans.is_empty() {
         display::kv(
             "Orphan temps",
@@ -318,9 +379,16 @@ fn run_status_inner() -> Result<()> {
             ),
         );
     }
-
-    println!();
-    Ok(())
+    if let Some(scan) = scan.filter(|s| s.config_findings > 0) {
+        display::kv(
+            "~/.claude.json",
+            format!(
+                "{} secret-looking MCP value(s), not modified (see `scan` output)",
+                scan.config_findings
+            )
+            .yellow(),
+        );
+    }
 }
 
 fn not_installed() -> String {
@@ -331,30 +399,37 @@ fn not_installed() -> String {
     )
 }
 
-/// Per-event hook status rows for the dashboard.
-fn hook_report(settings_path: &Path) -> Vec<(String, String)> {
+/// Per-event hook status rows for the dashboard, plus whether every hook is
+/// installed with an absolute command.
+fn hook_report(settings_path: &Path) -> (Vec<(String, String)>, bool) {
     let root: Option<serde_json::Value> = match std::fs::read_to_string(settings_path) {
         Ok(data) => match serde_json::from_str(&data) {
             Ok(v) => Some(v),
             Err(e) => {
-                return vec![(
-                    "settings.json".into(),
-                    format!("could not parse: {e}").red().to_string(),
-                )];
+                return (
+                    vec![(
+                        "settings.json".into(),
+                        format!("could not parse: {e}").red().to_string(),
+                    )],
+                    false,
+                );
             }
         },
         Err(_) => None,
     };
     let mut rows = Vec::new();
+    let mut healthy = true;
     for &event in HOOK_EVENTS {
         let key = format!("{event} hook");
         let Some(hook) = root.as_ref().and_then(|r| find_installed_hook(r, event)) else {
             rows.push((key, not_installed()));
+            healthy = false;
             continue;
         };
         let mode = if hook.is_async { "async" } else { "sync" };
         rows.push((key, format!("{} ({mode})", "installed".green())));
         if !hook_command_is_absolute(&hook.command) {
+            healthy = false;
             rows.push((
                 String::new(),
                 format!(
@@ -366,7 +441,7 @@ fn hook_report(settings_path: &Path) -> Vec<(String, String)> {
             ));
         }
     }
-    rows
+    (rows, healthy)
 }
 
 /// Config file status rows: presence, permissions, load errors and skipped
@@ -451,7 +526,9 @@ mod tests {
                 {"type": "command", "command": "'/opt/bin/scrub-history' hook"}]}]}}"#,
         )
         .unwrap();
-        let text = joined(&hook_report(&path));
+        let (rows, healthy) = hook_report(&path);
+        assert!(!healthy, "PATH-resolved and missing hooks are unhealthy");
+        let text = joined(&rows);
         assert!(text.contains("Stop hook: installed (sync)"), "{text}");
         assert!(text.contains("resolved via PATH"), "{text}");
         assert_eq!(text.matches("resolved via PATH").count(), 1, "{text}");
@@ -460,9 +537,25 @@ mod tests {
     }
 
     #[test]
+    fn hook_report_healthy_when_all_installed_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let hook = serde_json::json!([{"matcher": "", "hooks": [
+            {"type": "command", "command": "'/opt/bin/scrub-history' hook"}]}]);
+        let hooks: serde_json::Map<String, serde_json::Value> = HOOK_EVENTS
+            .iter()
+            .map(|e| ((*e).to_string(), hook.clone()))
+            .collect();
+        std::fs::write(&path, serde_json::json!({ "hooks": hooks }).to_string()).unwrap();
+        let (rows, healthy) = hook_report(&path);
+        assert!(healthy, "{}", joined(&rows));
+    }
+
+    #[test]
     fn hook_report_missing_settings() {
         let dir = tempfile::tempdir().unwrap();
-        let rows = hook_report(&dir.path().join("settings.json"));
+        let (rows, healthy) = hook_report(&dir.path().join("settings.json"));
+        assert!(!healthy);
         assert_eq!(rows.len(), HOOK_EVENTS.len());
     }
 
