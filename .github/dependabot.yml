@@ -8,9 +8,17 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    # Majors get their own group so one breaking upgrade can't block routine ones.
     groups:
       cargo-minor-patch:
+        applies-to: version-updates
         update-types: [minor, patch]
+      cargo-major:
+        applies-to: version-updates
+        update-types: [major]
+      cargo-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: /
@@ -20,6 +28,14 @@ updates:
     commit-message:
       prefix: ci
       include: scope
+    # Majors get their own group so one breaking upgrade can't block routine ones.
     groups:
       actions-minor-patch:
+        applies-to: version-updates
         update-types: [minor, patch]
+      actions-major:
+        applies-to: version-updates
+        update-types: [major]
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
