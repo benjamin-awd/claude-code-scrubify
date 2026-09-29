@@ -95,7 +95,45 @@ static BUILTIN_EXCLUSION_RE: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/=_\-]{20,}").unwrap());
+/// Shortest run of token bytes considered at all (`min_len` may raise it).
+const TOKEN_MIN_LEN: usize = 20;
+
+/// Bytes that make up a candidate token: `[A-Za-z0-9+/=_-]`.
+static TOKEN_BYTES: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut b = 0;
+    while b < 256 {
+        #[allow(clippy::cast_possible_truncation)]
+        let c = b as u8;
+        t[b] = c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'_' | b'-');
+        b += 1;
+    }
+    t
+};
+
+/// `(start, end)` of every maximal run of token bytes at least
+/// `TOKEN_MIN_LEN` long: the same spans `[A-Za-z0-9+/=_-]{20,}` finds, without
+/// the regex engine's forward-then-reverse search per match.
+fn candidate_tokens(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let b = text.as_bytes();
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        while i < b.len() {
+            if !TOKEN_BYTES[b[i] as usize] {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < b.len() && TOKEN_BYTES[b[i] as usize] {
+                i += 1;
+            }
+            if i - start >= TOKEN_MIN_LEN {
+                return Some((start, i));
+            }
+        }
+        None
+    })
+}
 
 pub fn shannon_entropy(s: &str) -> f64 {
     #[allow(clippy::cast_precision_loss)] // precision loss irrelevant for entropy calc
@@ -134,28 +172,34 @@ fn is_hex(token: &str) -> bool {
 
 /// Split an identifier into `camelCase` / `snake_case` / acronym / digit
 /// segments: `ZodBase64URLInternals` → `Zod`, `Base`, `64`, `URL`, `Internals`.
-fn identifier_segments(token: &str) -> Vec<&str> {
+fn identifier_segments(token: &str) -> impl Iterator<Item = &str> {
     let b = token.as_bytes();
-    let mut out = Vec::new();
     let mut start = 0;
-    for i in 1..b.len() {
-        let (prev, cur) = (b[i - 1], b[i]);
-        let boundary = (prev.is_ascii_alphabetic() != cur.is_ascii_alphabetic())
-            || (prev.is_ascii_digit() != cur.is_ascii_digit())
-            || (prev.is_ascii_lowercase() && cur.is_ascii_uppercase())
-            // Acronym followed by a word: the last capital starts the word.
-            || (prev.is_ascii_uppercase()
-                && cur.is_ascii_uppercase()
-                && b.get(i + 1).is_some_and(u8::is_ascii_lowercase));
-        if boundary {
-            out.push(&token[start..i]);
-            start = i;
+    let mut i = 1;
+    std::iter::from_fn(move || {
+        while i < b.len() {
+            let (prev, cur) = (b[i - 1], b[i]);
+            let boundary = (prev.is_ascii_alphabetic() != cur.is_ascii_alphabetic())
+                || (prev.is_ascii_digit() != cur.is_ascii_digit())
+                || (prev.is_ascii_lowercase() && cur.is_ascii_uppercase())
+                // Acronym followed by a word: the last capital starts the word.
+                || (prev.is_ascii_uppercase()
+                    && cur.is_ascii_uppercase()
+                    && b.get(i + 1).is_some_and(u8::is_ascii_lowercase));
+            i += 1;
+            if boundary {
+                let seg = &token[start..i - 1];
+                start = i - 1;
+                return Some(seg);
+            }
         }
-    }
-    if start < b.len() {
-        out.push(&token[start..]);
-    }
-    out
+        if start < b.len() {
+            let seg = &token[start..];
+            start = b.len();
+            return Some(seg);
+        }
+        None
+    })
 }
 
 /// An alphabetic segment with at least one vowel per four letters. English
@@ -181,7 +225,6 @@ fn is_pronounceable(segment: &str) -> bool {
 /// (`SnowflakeS3BackupMode`, `deep_readonly_schemas_0`).
 fn is_wordy(token: &str) -> bool {
     let word_chars: usize = identifier_segments(token)
-        .into_iter()
         .filter(|s| {
             (s.len() >= 4 && is_pronounceable(s))
                 || (s.len() >= 3 && s.bytes().all(|b| b.is_ascii_uppercase()))
@@ -211,12 +254,15 @@ fn has_all_classes(token: &str) -> bool {
 /// and the length-scaled threshold, or (for 32+ chars, where a class can be
 /// missing by chance) the full un-scaled threshold.
 fn looks_random(token: &str, cap: f64) -> bool {
-    if is_wordy(token) {
+    let all_classes = has_all_classes(token);
+    if !all_classes && token.len() < LONG_TOKEN_LEN {
         return false;
     }
     let entropy = shannon_entropy(token);
-    (has_all_classes(token) && entropy >= base64_threshold(token.len(), cap))
-        || (token.len() >= LONG_TOKEN_LEN && entropy >= cap)
+    // Word check last: it is the costliest test and most tokens fail earlier.
+    ((all_classes && entropy >= base64_threshold(token.len(), cap))
+        || (token.len() >= LONG_TOKEN_LEN && entropy >= cap))
+        && !is_wordy(token)
 }
 
 /// A `/`-containing token is a path when it has 2+ segments, no base64-only
@@ -227,9 +273,9 @@ fn is_path_like(token: &str) -> bool {
     if token.contains(['+', '=']) {
         return false;
     }
-    let segments: Vec<&str> = token.split('/').filter(|s| !s.is_empty()).collect();
-    segments.len() >= 2
-        && segments.iter().all(|s| {
+    let mut segments = token.split('/').filter(|s| !s.is_empty());
+    segments.clone().nth(1).is_some()
+        && segments.all(|s| {
             s.len() < PATH_SEGMENT_MIN_CHECK_LEN || is_hex(s) || is_wordy(s) || !has_all_classes(s)
         })
 }
@@ -326,17 +372,11 @@ fn find_high_entropy_tokens_inner(
         return Vec::new();
     }
 
-    TOKEN_RE
-        .find_iter(text)
-        .filter_map(|m| {
-            let token = m.as_str();
-            if token.len() < config.min_len || BUILTIN_EXCLUSION_RE.is_match(token) {
-                return None;
-            }
-            if let Some(re) = user_exclusions
-                && re.is_match(token)
-            {
-                return None;
+    candidate_tokens(text)
+        .filter(|&(start, end)| {
+            let token = &text[start..end];
+            if token.len() < config.min_len {
+                return false;
             }
             let flagged = if is_hex(token) {
                 // Bare hex is usually a hash (git SHA, checksum); only flag it
@@ -345,17 +385,19 @@ fn find_high_entropy_tokens_inner(
                     && token.bytes().any(|b| b.is_ascii_digit())
                     && token.bytes().any(|b| b.is_ascii_alphabetic())
                     && shannon_entropy(token) >= HEX_THRESHOLD
-                    && has_key_context(text, m.start())
+                    && has_key_context(text, start)
             } else if token.contains('/') && is_path_like(token) {
                 false
             } else {
                 looks_random(token, config.threshold)
             };
-            flagged.then_some(EntropyMatch {
-                start: m.start(),
-                end: m.end(),
-            })
+            // Exclusions only matter for tokens that would be flagged, which
+            // are rare, so check them last.
+            flagged
+                && !BUILTIN_EXCLUSION_RE.is_match(token)
+                && !user_exclusions.is_some_and(|re| re.is_match(token))
         })
+        .map(|(start, end)| EntropyMatch { start, end })
         .collect()
 }
 
@@ -403,13 +445,35 @@ mod tests {
     #[test]
     fn splits_identifier_segments() {
         assert_eq!(
-            identifier_segments("ZodBase64URLInternals"),
+            identifier_segments("ZodBase64URLInternals").collect::<Vec<_>>(),
             ["Zod", "Base", "64", "URL", "Internals"]
         );
         assert_eq!(
-            identifier_segments("deep_readonly-x"),
+            identifier_segments("deep_readonly-x").collect::<Vec<_>>(),
             ["deep", "_", "readonly", "-", "x"]
         );
+    }
+
+    #[test]
+    fn candidate_tokens_match_token_regex() {
+        let re = Regex::new(r"[A-Za-z0-9+/=_\-]{20,}").unwrap();
+        let long = "Q".repeat(20);
+        for text in [
+            "",
+            "short words only",
+            "aB3kL9mN2pQ5rT8vX1yZ4cF7gH0jK6wE",
+            "x=aB3kL9mN2pQ5rT8vX1yZ4cF7gH0jK6wE; y=/usr/local/lib/python3.12/site",
+            "é→aB3kL9mN2pQ5rT8vX1yZ4cF7—gH0jK6wEaB3kL9mN2pQ5rT8vX1yZ4cF7—",
+            "0123456789012345678 01234567890123456789 ",
+            long.as_str(),
+        ] {
+            let expected: Vec<_> = re.find_iter(text).map(|m| (m.start(), m.end())).collect();
+            assert_eq!(
+                candidate_tokens(text).collect::<Vec<_>>(),
+                expected,
+                "{text}"
+            );
+        }
     }
 
     #[test]
