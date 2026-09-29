@@ -52,22 +52,25 @@ pub fn scrub_text(
     allowlist: &Allowlist,
     blacklist: &Blacklist,
 ) -> (String, Vec<Redaction>) {
+    // One RegexSet pass tells us which patterns matched; a separate is_match()
+    // for the bail-out would scan the text twice.
+    let matching_indices: Vec<_> = pattern_set.quick_check.matches(text).into_iter().collect();
+
     // Fast bail-out: if no regex matches at all, entropy is disabled, and no
     // blacklist entries match, return early
-    if !pattern_set.quick_check.is_match(text)
-        && !entropy_cfg.enabled
-        && !blacklist.contains_any(text)
-    {
+    if matching_indices.is_empty() && !entropy_cfg.enabled && !blacklist.contains_any(text) {
         return (text.to_string(), Vec::new());
     }
 
     let mut spans: Vec<Redaction> = Vec::new();
 
-    // Collect regex matches
-    // Use quick_check to find which patterns matched, then keyword pre-filter,
-    // then get exact spans.
-    let text_lower = text.to_lowercase();
-    let matching_indices: Vec<_> = pattern_set.quick_check.matches(text).into_iter().collect();
+    // Collect regex matches: keyword pre-filter, then exact spans. Lowercasing
+    // is only needed for the keyword check, so skip it when nothing matched.
+    let text_lower = if matching_indices.is_empty() {
+        String::new()
+    } else {
+        text.to_lowercase()
+    };
     for idx in matching_indices {
         let pat = &pattern_set.patterns[idx];
         if !pat.keyword_hit(&text_lower) {

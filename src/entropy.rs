@@ -94,11 +94,35 @@ pub fn compile_exclude_patterns(patterns: &[String]) -> Option<Regex> {
     Regex::new(&combined).ok()
 }
 
+thread_local! {
+    /// Last compiled exclude set, keyed by its source patterns. Compiling a
+    /// `Regex` per scanned string made a cold scan ~6x slower with a single
+    /// exclude pattern configured (and logged invalid patterns per string).
+    static EXCLUDE_CACHE: std::cell::RefCell<Option<(Vec<String>, Option<Regex>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn cached_exclude_patterns(patterns: &[String]) -> Option<Regex> {
+    if patterns.is_empty() {
+        return None;
+    }
+    EXCLUDE_CACHE.with_borrow_mut(|cache| {
+        if let Some((key, re)) = cache.as_ref()
+            && key.as_slice() == patterns
+        {
+            return re.clone();
+        }
+        let re = compile_exclude_patterns(patterns);
+        *cache = Some((patterns.to_vec(), re.clone()));
+        re
+    })
+}
+
 pub fn find_high_entropy_tokens(text: &str, config: &EntropyConfig) -> Vec<EntropyMatch> {
     find_high_entropy_tokens_inner(
         text,
         config,
-        compile_exclude_patterns(&config.exclude_patterns).as_ref(),
+        cached_exclude_patterns(&config.exclude_patterns).as_ref(),
     )
 }
 
@@ -177,6 +201,18 @@ mod tests {
         let text = "[REDACTED:aws-access-key]";
         let matches = find_high_entropy_tokens(text, &config);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn exclude_cache_tracks_pattern_changes() {
+        let token = "toolu_01WcKqikcTdC72gZJhSFfmYf";
+        let a = vec![r"toolu_[A-Za-z0-9]+".to_string()];
+        let b = vec![r"other_[A-Za-z0-9]+".to_string()];
+        assert!(cached_exclude_patterns(&a).unwrap().is_match(token));
+        // Same thread, different list: must recompile, not reuse `a`.
+        assert!(!cached_exclude_patterns(&b).unwrap().is_match(token));
+        assert!(cached_exclude_patterns(&a).unwrap().is_match(token));
+        assert!(cached_exclude_patterns(&[]).is_none());
     }
 
     #[test]
