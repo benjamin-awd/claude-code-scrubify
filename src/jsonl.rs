@@ -128,12 +128,33 @@ fn scrub_jsonl_file_with_hook(
         other => other,
     };
 
+    // Incremental fast path: scan only the appended tail, read-only. A clean
+    // tail (the common case after a turn) needs no temp file and no O(file)
+    // prefix copy; only when it contains a secret do we fall through to the
+    // full rewrite below, which rescans that small tail.
+    if let Some(offset) = skip_bytes
+        && !ctx.dry_run
+    {
+        let mut probe = LineState {
+            ctx,
+            line_number: 0,
+            out_len: offset,
+            redactions: Vec::new(),
+            lines_modified: 0,
+            diffs: Vec::new(),
+        };
+        let (pos, _eof) = probe.process_complete_lines(&mut file, offset, &mut io::sink())?;
+        if probe.redactions.is_empty() {
+            return Ok(probe.into_result(pos));
+        }
+    }
+
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let temp = NamedTempFile::new_in(dir).context("creating temp file")?;
-    let mut writer = BufWriter::new(temp.as_file().try_clone()?);
+    let mut writer = BufWriter::with_capacity(1 << 20, temp.as_file().try_clone()?);
 
     // If incremental, raw-copy the already-scrubbed prefix, then process only the tail.
     let (mut pos, line_number_offset) = match skip_bytes {
@@ -1088,6 +1109,46 @@ mod tests {
         assert!(content.contains("[REDACTED:github-token]"));
         // The clean prefix line should still be present
         assert!(content.contains("hello world"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incremental_clean_tail_does_not_rewrite() {
+        use std::os::unix::fs::MetadataExt;
+
+        let clean = r#"{"type":"user","message":{"content":"hello world"}}"#;
+        let file = make_test_file(&format!("{clean}\n"));
+        let offset = fs::metadata(file.path()).unwrap().len();
+        {
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(file.path())
+                .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"assistant","message":{{"content":"still clean"}}}}"#
+            )
+            .unwrap();
+        }
+        let before = fs::read(file.path()).unwrap();
+        let ino = fs::metadata(file.path()).unwrap().ino();
+
+        let (ps, ec, al, bl) = test_fixtures();
+        let result =
+            scrub_jsonl_file(file.path(), &ps, &ec, &al, &bl, false, Some(offset)).unwrap();
+
+        assert!(result.redactions.is_empty());
+        assert_eq!(
+            result.final_size,
+            before.len() as u64,
+            "offset must advance"
+        );
+        assert_eq!(
+            fs::metadata(file.path()).unwrap().ino(),
+            ino,
+            "clean tail must not replace the file"
+        );
+        assert_eq!(fs::read(file.path()).unwrap(), before);
     }
 
     #[test]
