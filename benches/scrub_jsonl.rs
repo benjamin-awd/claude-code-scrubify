@@ -1,205 +1,82 @@
-use std::io::Write;
+//! Wall-clock benchmarks (criterion) for local use. Same cases and corpus as
+//! the instruction-count regression benches in `hook_regression.rs`, which
+//! are the ones CI gates on. See README "Benchmarks".
 
-use criterion::{Criterion, criterion_group, criterion_main};
-use scrub_history::allowlist::{Allowlist, Blacklist};
-use scrub_history::entropy::EntropyConfig;
-use scrub_history::jsonl::scrub_jsonl_file;
-use scrub_history::patterns::PatternSet;
+mod common;
 
-/// Fake secrets sprinkled into synthetic messages.
-const FAKE_GH_TOKEN: &str = "ghp_R4nd0mF4keT0kenV4lueABCDEFGHIJKLMnopqr";
-const FAKE_AWS_KEY: &str = "AKIAIOSFODNN7FAKEXYZ";
-const FAKE_ANTHROPIC_KEY: &str = "sk-ant-api03-fakekey1234567890abcdefghijklmnop";
+use std::hint::black_box;
 
-/// Build a synthetic JSONL corpus that exercises the hot-path of hook mode:
-/// mixed message types, scattered secrets, and realistic sizes.
-fn build_corpus(num_lines: usize) -> String {
-    let mut lines = Vec::with_capacity(num_lines);
+use common::{Fixture, P50_BYTES};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use scrub_history::scrubber::scrub_text;
+use tempfile::TempDir;
 
-    for i in 0..num_lines {
-        let line = match i % 6 {
-            // System message (should be skipped entirely)
-            0 => r#"{"type":"system","content":"You are a helpful assistant."}"#.to_string(),
+fn bench_scrub_text(c: &mut Criterion) {
+    let fx = Fixture::new();
+    let clean = common::text_chunk();
+    let with_secret = clean.clone() + &common::secret_line();
 
-            // User message — clean (majority of lines in a real transcript)
-            1 => r#"{"type":"user","message":{"content":"Please refactor the parse_config function in src/config.rs to use the builder pattern. I want it to validate inputs eagerly and return descriptive errors. Here is the current implementation which is about 120 lines of Rust code."}}"#.to_string(),
-
-            // User message — contains a GitHub token
-            2 => format!(
-                r#"{{"type":"user","message":{{"content":"I set the env var GITHUB_TOKEN={FAKE_GH_TOKEN} but the CI still fails. Can you check why?"}}}}"#
-            ),
-
-            // Assistant text reply — contains AWS key in a code block
-            3 => format!(
-                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"I found the issue. Your config has the access key {FAKE_AWS_KEY} hard-coded. You should use an IAM role instead. Let me show you the recommended approach using environment variables and the AWS SDK credential chain."}}]}}}}"#
-            ),
-
-            // Assistant tool_use — clean
-            4 => r#"{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"command":"cargo test --release -- --nocapture"}}]}}"#.to_string(),
-
-            // User message — contains Anthropic key in a JSON blob
-            5 => format!(
-                r#"{{"type":"user","message":{{"content":{{"api_key":"{FAKE_ANTHROPIC_KEY}","model":"claude-sonnet-4-20250514"}}}}}}"#
-            ),
-
-            _ => unreachable!(),
-        };
-        lines.push(line);
+    let mut group = c.benchmark_group("scrub_text");
+    for (name, text) in [("clean", &clean), ("with_secret", &with_secret)] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                scrub_text(
+                    black_box(text),
+                    &fx.patterns,
+                    &fx.entropy,
+                    &fx.allowlist,
+                    &fx.blacklist,
+                )
+            });
+        });
     }
-
-    lines.join("\n") + "\n"
-}
-
-fn bench_scrub_jsonl(c: &mut Criterion) {
-    let pattern_set = PatternSet::load(true).expect("failed to load patterns");
-    let entropy_cfg = EntropyConfig {
-        enabled: true,
-        ..Default::default()
-    };
-    let allowlist = Allowlist::empty();
-    let blacklist = Blacklist::empty();
-
-    // ~500 lines ≈ a medium-length Claude conversation
-    let corpus_500 = build_corpus(500);
-
-    // ~2000 lines ≈ a long session
-    let corpus_2000 = build_corpus(2000);
-
-    let mut group = c.benchmark_group("scrub_jsonl");
-
-    group.bench_function("500_lines", |b| {
-        b.iter_batched(
-            || {
-                let mut f = tempfile::NamedTempFile::new().unwrap();
-                f.write_all(corpus_500.as_bytes()).unwrap();
-                f.flush().unwrap();
-                f
-            },
-            |f| {
-                scrub_jsonl_file(
-                    f.path(),
-                    &pattern_set,
-                    &entropy_cfg,
-                    &allowlist,
-                    &blacklist,
-                    false,
-                    None,
-                )
-                .unwrap();
-            },
-            criterion::BatchSize::PerIteration,
-        );
-    });
-
-    group.bench_function("2000_lines", |b| {
-        b.iter_batched(
-            || {
-                let mut f = tempfile::NamedTempFile::new().unwrap();
-                f.write_all(corpus_2000.as_bytes()).unwrap();
-                f.flush().unwrap();
-                f
-            },
-            |f| {
-                scrub_jsonl_file(
-                    f.path(),
-                    &pattern_set,
-                    &entropy_cfg,
-                    &allowlist,
-                    &blacklist,
-                    false,
-                    None,
-                )
-                .unwrap();
-            },
-            criterion::BatchSize::PerIteration,
-        );
-    });
-
-    // Incremental: pre-scrub 2000 lines, record offset, append 2 new lines
-    let corpus_2000_for_incr = build_corpus(2000);
-    let two_new_lines = build_corpus(2); // 2 lines to append
-
-    group.bench_function("2000_lines_incremental_2_new", |b| {
-        b.iter_batched(
-            || {
-                let mut f = tempfile::NamedTempFile::new().unwrap();
-                f.write_all(corpus_2000_for_incr.as_bytes()).unwrap();
-                f.flush().unwrap();
-                // Pre-scrub to establish baseline
-                let result = scrub_jsonl_file(
-                    f.path(),
-                    &pattern_set,
-                    &entropy_cfg,
-                    &allowlist,
-                    &blacklist,
-                    false,
-                    None,
-                )
-                .unwrap();
-                let offset = result.final_size;
-                // Append 2 new lines
-                {
-                    use std::fs::OpenOptions;
-                    let mut file = OpenOptions::new().append(true).open(f.path()).unwrap();
-                    file.write_all(two_new_lines.as_bytes()).unwrap();
-                }
-                (f, offset)
-            },
-            |(f, offset)| {
-                scrub_jsonl_file(
-                    f.path(),
-                    &pattern_set,
-                    &entropy_cfg,
-                    &allowlist,
-                    &blacklist,
-                    false,
-                    Some(offset),
-                )
-                .unwrap();
-            },
-            criterion::BatchSize::PerIteration,
-        );
-    });
-
     group.finish();
 }
 
-/// Hard gate: hook mode must finish a 500-line transcript in under 100ms.
-/// This runs as a standalone benchmark so CI can assert on it.
-fn bench_hook_latency_gate(c: &mut Criterion) {
-    let pattern_set = PatternSet::load(true).expect("failed to load patterns");
-    let entropy_cfg = EntropyConfig {
-        enabled: true,
-        ..Default::default()
-    };
-    let allowlist = Allowlist::empty();
-    let blacklist = Blacklist::empty();
-    let corpus = build_corpus(500);
+fn bench_scrub_file(c: &mut Criterion) {
+    let fx = Fixture::new();
+    let base = common::transcript(P50_BYTES);
+    let turn = common::turn();
+    let secret = common::secret_line();
 
-    c.bench_function("hook_latency_gate_500_lines", |b| {
+    // Already-scrubbed transcript and its offset, as the hook sees it.
+    let dir = TempDir::new().unwrap();
+    let seed = common::write_file(dir.path(), "seed.jsonl", &base);
+    let offset = fx.scrub(&seed, None);
+    let scrubbed = std::fs::read_to_string(&seed).unwrap();
+
+    let mut group = c.benchmark_group("scrub_file_p50");
+    group.bench_function("cold", |b| {
         b.iter_batched(
             || {
-                let mut f = tempfile::NamedTempFile::new().unwrap();
-                f.write_all(corpus.as_bytes()).unwrap();
-                f.flush().unwrap();
-                f
+                let d = TempDir::new().unwrap();
+                let p = common::write_file(d.path(), "s.jsonl", &base);
+                (d, p)
             },
-            |f| {
-                scrub_jsonl_file(
-                    f.path(),
-                    &pattern_set,
-                    &entropy_cfg,
-                    &allowlist,
-                    &blacklist,
-                    false,
-                    None,
-                )
-                .unwrap();
-            },
-            criterion::BatchSize::PerIteration,
+            |(_d, p)| fx.scrub(&p, None),
+            BatchSize::PerIteration,
         );
     });
+    for (name, extra) in [
+        ("incremental_clean", ""),
+        ("incremental_secret", secret.as_str()),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter_batched(
+                || {
+                    let d = TempDir::new().unwrap();
+                    let p = common::write_file(d.path(), "s.jsonl", &scrubbed);
+                    common::append(&p, &turn);
+                    common::append(&p, extra);
+                    (d, p)
+                },
+                |(_d, p)| fx.scrub(&p, Some(offset)),
+                BatchSize::PerIteration,
+            );
+        });
+    }
+    group.finish();
 }
 
-criterion_group!(benches, bench_scrub_jsonl, bench_hook_latency_gate);
+criterion_group!(benches, bench_scrub_text, bench_scrub_file);
 criterion_main!(benches);

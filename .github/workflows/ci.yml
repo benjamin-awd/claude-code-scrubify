@@ -58,6 +58,113 @@ jobs:
       - name: cargo build --release
         run: cargo build --release --locked
 
+  perf:
+    name: perf regression (instruction counts)
+    # Compares the PR against its base commit, so it only makes sense on PRs.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Fail if any benchmark executes >10% more instructions than the base.
+      # Run-to-run noise is ~0.5%.
+      PERF_LIMITS: ir=10%
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: head
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+      - name: Install Rust toolchain and Valgrind
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq valgrind
+          # Baselines are shared between the base and head runs so head can
+          # compare against base. Each checkout keeps its own target/ dir:
+          # sharing one lets cargo reuse the other checkout's build (freshness
+          # is mtime-based), silently benchmarking the wrong code.
+          echo "GUNGRAUN_HOME=$RUNNER_TEMP/gungraun" >> "$GITHUB_ENV"
+      - name: Resolve gungraun-runner versions
+        id: runner
+        # The runner binary must match the gungraun library version exactly,
+        # and base/head can differ (e.g. a Dependabot bump).
+        run: |
+          ver() { awk '/^name = "gungraun-runner"$/ {getline; gsub(/"/, "", $3); print $3}' "$1/Cargo.lock"; }
+          echo "head=$(ver head)" >> "$GITHUB_OUTPUT"
+          echo "base=$(ver base)" >> "$GITHUB_OUTPUT"
+      - name: Install gungraun-runner
+        env:
+          HEAD_VER: ${{ steps.runner.outputs.head }}
+          BASE_VER: ${{ steps.runner.outputs.base }}
+        # Prebuilt release binaries, verified against checksums pinned here
+        # (upstream publishes no provenance attestations, and a .sha256 from
+        # the same release proves only integrity). Unpinned versions, e.g.
+        # after a Dependabot bump, fall back to building from crates.io:
+        # slower but equally trusted. Pin the new hash to restore the fast path.
+        run: |
+          declare -A PINNED=(
+            [0.20.0]=b3b39d4243e43597512a1f79016a1f38cbf90e5869c0c2535fe4097c69ed91aa
+          )
+          target=x86_64-unknown-linux-gnu
+          for v in $(printf '%s\n' "$HEAD_VER" "$BASE_VER" | sort -u); do
+            [ -n "$v" ] || continue
+            dest="$RUNNER_TEMP/gungraun-runner/$v/bin"
+            mkdir -p "$dest"
+            sha="${PINNED[$v]:-}"
+            if [ -n "$sha" ]; then
+              name="gungraun-runner-v$v-$target"
+              curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+                "https://github.com/gungraun/gungraun/releases/download/v$v/$name.tar.gz"
+              echo "$sha  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+              tar xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+              mv "$RUNNER_TEMP/$name/gungraun-runner" "$dest/"
+            else
+              echo "::notice::No pinned checksum for gungraun-runner $v; building from crates.io."
+              cargo install --locked gungraun-runner --version "$v" --root "$RUNNER_TEMP/gungraun-runner/$v"
+            fi
+          done
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            head -> target
+            base -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Benchmark base
+        id: base
+        working-directory: base
+        env:
+          BASE_VER: ${{ steps.runner.outputs.base }}
+        run: |
+          if [ ! -f benches/hook_regression.rs ] || [ -z "$BASE_VER" ]; then
+            echo "::notice::Base commit has no regression benchmarks; skipping comparison."
+            echo "compare=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          GUNGRAUN_RUNNER="$RUNNER_TEMP/gungraun-runner/$BASE_VER/bin/gungraun-runner" \
+            cargo bench --locked --bench hook_regression -- --save-baseline=base
+          echo "compare=true" >> "$GITHUB_OUTPUT"
+      - name: Benchmark head and compare
+        working-directory: head
+        env:
+          HEAD_VER: ${{ steps.runner.outputs.head }}
+          COMPARE: ${{ steps.base.outputs.compare }}
+        run: |
+          export GUNGRAUN_RUNNER="$RUNNER_TEMP/gungraun-runner/$HEAD_VER/bin/gungraun-runner"
+          if [ "$COMPARE" != true ]; then
+            cargo bench --locked --bench hook_regression
+          elif ! diff -rq ../base/benches/common benches/common >/dev/null; then
+            # A different corpus makes base and head numbers incomparable.
+            echo "::warning::Benchmark corpus changed in this PR; reporting without enforcing limits."
+            cargo bench --locked --bench hook_regression -- --baseline=base
+          else
+            cargo bench --locked --bench hook_regression -- --baseline=base --callgrind-limits="$PERF_LIMITS"
+          fi
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

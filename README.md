@@ -261,6 +261,49 @@ Key/value patterns redact only the value and skip variable references
 `os.environ[...]`, multi-word identifiers). `TOKEN_TYPE=`,
 `PASSWORD_MIN_LENGTH=` and `MAX_TOKENS=` are not credentials.
 
+## Benchmarks
+
+The hook runs on every turn, and `PreCompact`/`SessionEnd` run synchronously,
+so hot-path regressions are user-visible. Two benchmark suites share one
+deterministic synthetic corpus (`benches/common`), calibrated to real
+transcripts (~2.4 KB/line, p50 ~616 KB):
+
+| Suite | Measures | Where |
+|---|---|---|
+| `hook_regression` ([gungraun]) | Instruction counts under Valgrind: deterministic (~0.5% run-to-run) | CI gate on every PR |
+| `scrub_jsonl` ([criterion]) | Wall-clock time, including fsync and other I/O instruction counts can't see | Local |
+
+CI benchmarks the PR's base commit, then the PR, and fails if any benchmark
+executes more than 10% more instructions. If a PR changes `benches/common`,
+base and head numbers aren't comparable, so the job reports without enforcing
+the limit.
+
+Run locally:
+
+```bash
+# Wall-clock (any OS)
+cargo bench --bench scrub_jsonl
+
+# Instruction counts (Linux; needs valgrind and a matching gungraun-runner)
+cargo install --locked gungraun-runner --version 0.20.0
+cargo bench --bench hook_regression -- --save-baseline=before
+# ...make changes...
+cargo bench --bench hook_regression -- --baseline=before --callgrind-limits='ir=10%'
+```
+
+On macOS, run the gungraun suite in Docker. `seccomp=unconfined` lets gungraun
+disable ASLR for reproducible counts:
+
+```bash
+docker run --rm --security-opt seccomp=unconfined -v "$PWD":/src -w /src rust:1.96.1 bash -c \
+  'apt-get update -qq && apt-get install -y -qq valgrind &&
+   cargo install --locked gungraun-runner --version 0.20.0 &&
+   cargo bench --bench hook_regression'
+```
+
+[gungraun]: https://crates.io/crates/gungraun
+[criterion]: https://crates.io/crates/criterion
+
 ## License
 
 AGPL-3.0
