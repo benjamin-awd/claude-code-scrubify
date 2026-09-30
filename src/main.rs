@@ -5,6 +5,11 @@ use scrub_history::entropy::EntropyConfig;
 use scrub_history::locations::{Location, LocationSet};
 use tracing_subscriber::EnvFilter;
 
+// The system allocator (notably macOS's) is slow for the many small
+// allocations JSON parsing makes.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(
     name = "scrub-history",

@@ -68,6 +68,12 @@ jobs:
       # Fail if any benchmark executes >10% more instructions than the base.
       # Run-to-run noise is ~0.5%.
       PERF_LIMITS: ir=10%
+      # Link with GNU ld, not rustc's default lld. lld emits two RW PT_LOAD
+      # segments; when the first ends on a page boundary the kernel merges
+      # their mappings, Valgrind 3.22 then never reads the binary's symbols,
+      # and every benchmark reports 0 instructions (the gungraun entry point
+      # is matched by symbol name). GNU ld emits a single RW segment.
+      RUSTFLAGS: -C linker-features=-lld
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
