@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.0](https://github.com/benjamin-awd/claude-code-scrubify/compare/scrub-history-v0.4.0...scrub-history-v0.5.0) (2026-09-30)
+
+
+### Features
+
+* add Grafana, Vault, Terraform Cloud, GCP SA key and other secret patterns ([#5](https://github.com/benjamin-awd/claude-code-scrubify/issues/5)) ([cbf22d9](https://github.com/benjamin-awd/claude-code-scrubify/commit/cbf22d9ef5e331c6d1b9effa26cf4415a5cde5d5))
+* scan tool-results, jobs, history, paste-cache, file-history, plans and shell snapshots ([#10](https://github.com/benjamin-awd/claude-code-scrubify/issues/10)) ([af65683](https://github.com/benjamin-awd/claude-code-scrubify/commit/af65683580c27856af8efae4e2845172d13e06c3))
+* slim down `status` and gate detail behind sections ([#24](https://github.com/benjamin-awd/claude-code-scrubify/issues/24)) ([2a39eb3](https://github.com/benjamin-awd/claude-code-scrubify/commit/2a39eb332bac628e29a7e8df4414accf88728da1))
+
+
+### Bug Fixes
+
+* close secret-detection bypasses (JSON/env/CLI/URL/k8s/PEM, entropy, key names, system lines) ([#21](https://github.com/benjamin-awd/claude-code-scrubify/issues/21)) ([3912f92](https://github.com/benjamin-awd/claude-code-scrubify/commit/3912f92e76aa7d7b8ed58f92d8d09732ecfc16f1))
+* make JSONL rewrite lossless and restrict hook to project transcripts ([#8](https://github.com/benjamin-awd/claude-code-scrubify/issues/8)) ([9969bd1](https://github.com/benjamin-awd/claude-code-scrubify/commit/9969bd195bef53ea445dd72b2d3ed2ab505efdf2))
+* resolve clippy 1.96 lints and bump CI toolchain to 1.96.1 ([#18](https://github.com/benjamin-awd/claude-code-scrubify/issues/18)) ([51fcff6](https://github.com/benjamin-awd/claude-code-scrubify/commit/51fcff6c792508f26adcbe121f751e2de2bd59f4))
+* stop secret self-leaks and config loss; register more hook events ([#9](https://github.com/benjamin-awd/claude-code-scrubify/issues/9)) ([168f60b](https://github.com/benjamin-awd/claude-code-scrubify/commit/168f60b8950907e90fec70c15ad06ec4c031f212))
+
+
+### Performance Improvements
+
+* cut hook cost on the incremental path and with entropy exclude patterns ([#19](https://github.com/benjamin-awd/claude-code-scrubify/issues/19)) ([b38eeee](https://github.com/benjamin-awd/claude-code-scrubify/commit/b38eeeeadc527134b7c0c869046866157c8a2e81))
+* halve scan cost (entropy scanner, clean-line probe, mimalloc) ([#26](https://github.com/benjamin-awd/claude-code-scrubify/issues/26)) ([a2f31a0](https://github.com/benjamin-awd/claude-code-scrubify/commit/a2f31a0c13d142b1be6bd065dee40626d94b64a3))
+* keep the pattern RegexSet on the lazy DFA and skip needless copies ([#23](https://github.com/benjamin-awd/claude-code-scrubify/issues/23)) ([96c3f24](https://github.com/benjamin-awd/claude-code-scrubify/commit/96c3f24cfd4d604c43528df388a5d0120e81e7e0))
+
 ## [0.4.0](https://github.com/benjamin-awd/claude-code-scrubify/compare/scrub-history-v0.3.0...scrub-history-v0.4.0) (2026-09-03)
 
 
