@@ -80,8 +80,9 @@ const LONG_TOKEN_LEN: usize = 32;
 /// `/`-separated segments shorter than this always count as path-like.
 const PATH_SEGMENT_MIN_CHECK_LEN: usize = 8;
 
-/// Tokens that are never secrets: UUIDs, Claude Code message/tool IDs and
-/// Subresource-Integrity hashes from lockfiles.
+/// Tokens that are never secrets: UUIDs, Claude Code message/tool IDs,
+/// Subresource-Integrity hashes from lockfiles and claude.ai artifact paths.
+/// An artifact link's `?sk=` share key is a separate token and stays flagged.
 static BUILTIN_EXCLUSION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?x)
@@ -89,6 +90,7 @@ static BUILTIN_EXCLUSION_RE: LazyLock<Regex> = LazyLock::new(|| {
             [0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}  # UUIDs
             | (?:toolu|srvtoolu|msg|req)_[A-Za-z0-9_]{16,}                                 # Claude IDs
             | sha(?:1|256|384|512)-[A-Za-z0-9+/]{20,}={0,2}                               # SRI hashes
+            | ai/artifacts?/[A-Za-z0-9_-]{8,40}                                             # claude.ai artifacts
         )$
     ",
     )
@@ -622,6 +624,14 @@ mod tests {
         ] {
             assert!(flagged(path).is_empty(), "{path} flagged");
         }
+    }
+
+    #[test]
+    fn claude_artifact_links_keep_id_but_flag_share_key() {
+        let text =
+            "see https://claude.ai/artifact/YHr8GPPZeovaaUpvtDcRuj?sk=hAMLBZI8ut7PC2AXM8N5Aw";
+        assert_eq!(flagged(text), ["sk=hAMLBZI8ut7PC2AXM8N5Aw"]);
+        assert!(flagged("https://claude.ai/artifact/W4DEtAK4opmfBpX5VaCXwM").is_empty());
     }
 
     #[test]
