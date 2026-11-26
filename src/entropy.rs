@@ -82,7 +82,7 @@ const PATH_SEGMENT_MIN_CHECK_LEN: usize = 8;
 
 /// Tokens that are never secrets: UUIDs, Claude Code message/tool IDs,
 /// Subresource-Integrity hashes from lockfiles and claude.ai artifact paths.
-/// An artifact link's `?sk=` share key is a separate token and stays flagged.
+/// An artifact link's `?sk=` share key is handled by [`is_artifact_share_key`].
 static BUILTIN_EXCLUSION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?x)
@@ -96,6 +96,23 @@ static BUILTIN_EXCLUSION_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+/// A claude.ai artifact URL up to the `?` that starts its share-key query.
+static ARTIFACT_URL_PREFIX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"claude\.ai/artifacts?/[A-Za-z0-9_-]{8,40}\?$").unwrap());
+
+/// Is the token at `start..end` an `sk=` share key on a claude.ai artifact
+/// link? Share keys only open the artifact for members of the owning org.
+fn is_artifact_share_key(text: &str, start: usize, end: usize) -> bool {
+    if !text[start..end].starts_with("sk=") {
+        return false;
+    }
+    let mut lo = start.saturating_sub(64);
+    while !text.is_char_boundary(lo) {
+        lo += 1;
+    }
+    ARTIFACT_URL_PREFIX_RE.is_match(&text[lo..start])
+}
 
 /// Shortest run of token bytes considered at all (`min_len` may raise it).
 const TOKEN_MIN_LEN: usize = 20;
@@ -430,6 +447,7 @@ fn find_high_entropy_tokens_inner(
             flagged
                 && !BUILTIN_EXCLUSION_RE.is_match(token)
                 && !user_exclusions.is_some_and(|re| re.is_match(token))
+                && !is_artifact_share_key(text, start, end)
         })
         .map(|(start, end)| EntropyMatch { start, end })
         .collect()
@@ -627,11 +645,17 @@ mod tests {
     }
 
     #[test]
-    fn claude_artifact_links_keep_id_but_flag_share_key() {
+    fn claude_artifact_links_are_not_flagged() {
         let text =
             "see https://claude.ai/artifact/YHr8GPPZeovaaUpvtDcRuj?sk=hAMLBZI8ut7PC2AXM8N5Aw";
-        assert_eq!(flagged(text), ["sk=hAMLBZI8ut7PC2AXM8N5Aw"]);
+        assert!(flagged(text).is_empty());
+        // `sk=` elsewhere is still checked.
+        let other = "https://example.com/x?sk=hAMLBZI8ut7PC2AXM8N5Aw";
+        assert_eq!(flagged(other), ["sk=hAMLBZI8ut7PC2AXM8N5Aw"]);
         assert!(flagged("https://claude.ai/artifact/W4DEtAK4opmfBpX5VaCXwM").is_empty());
+        // Multi-byte text inside the lookback window must not panic.
+        let wide = format!("{}?sk=hAMLBZI8ut7PC2AXM8N5Aw", "é".repeat(40));
+        assert_eq!(flagged(&wide), ["sk=hAMLBZI8ut7PC2AXM8N5Aw"]);
     }
 
     #[test]
