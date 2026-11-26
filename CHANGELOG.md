@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/benjamin-awd/claude-code-scrubify/compare/scrub-history-v0.5.0...scrub-history-v0.5.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* stop redacting claude.ai artifact links ([#33](https://github.com/benjamin-awd/claude-code-scrubify/issues/33)) ([5634aaa](https://github.com/benjamin-awd/claude-code-scrubify/commit/5634aaaf2416aa58d860b406eace04323f2efbf3))
+
 ## [0.5.0](https://github.com/benjamin-awd/claude-code-scrubify/compare/scrub-history-v0.4.0...scrub-history-v0.5.0) (2026-09-30)
 
 
